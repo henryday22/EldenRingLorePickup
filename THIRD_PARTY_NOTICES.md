@@ -2,6 +2,14 @@
 
 This alpha relies on public reverse-engineering work from the Elden Ring modding community.
 
+## The Grand Archives Elden Ring table
+
+Repository: https://github.com/The-Grand-Archives/Elden-Ring-CT-TGA
+
+The public `ItemPopup_code.cea` script was used as the reverse-engineering reference for the
+large item-panel function signature, its `0x14` entry offset and the panel entry's item ID,
+quantity and gem fields. No Cheat Engine script or binary code is included in LorePickup.
+
 ## from-software-archipelago-clients
 
 Repository: https://github.com/4laric/from-software-archipelago-clients

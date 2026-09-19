@@ -5,27 +5,13 @@ use retour::GenericDetour;
 
 use crate::{overlay, runtime};
 
-type AddItemFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, u64) -> u64;
+type ItemPopupFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u64;
 
-static HOOK: OnceLock<GenericDetour<AddItemFn>> = OnceLock::new();
+static HOOK: OnceLock<GenericDetour<ItemPopupFn>> = OnceLock::new();
 
-const ENTRY_ID_OFFSET: usize = 0x04;
-const ENTRY_QUANTITY_OFFSET: usize = 0x08;
-const INVENTORY_LIST_OFFSETS: [usize; 4] = [0x0C, 0x1C, 0x2C, 0x3C];
-const LIST_CAPACITY_OFFSET: usize = 0x00;
-const LIST_POINTER_OFFSET: usize = 0x04;
-const LIST_ENTRY_COUNT_OFFSET: usize = 0x0C;
-const INVENTORY_ENTRY_SIZE: usize = 0x18;
-const INVENTORY_ENTRY_ID_OFFSET: usize = 0x04;
-const INVENTORY_ENTRY_IS_NEW_OFFSET: usize = 0x10;
-const MAX_INVENTORY_CAPACITY: usize = 16_384;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct InventoryState {
-    readable: bool,
-    exists: bool,
-    is_new: bool,
-}
+const POPUP_ID_OFFSET: usize = 0x00;
+const POPUP_QUANTITY_OFFSET: usize = 0x04;
+const POPUP_GEM_OFFSET: usize = 0x0C;
 
 pub fn install() -> Result<(), String> {
     if HOOK.get().is_some() {
@@ -38,137 +24,62 @@ pub fn install() -> Result<(), String> {
 
     let target_addr = runtime
         .base
-        .checked_add(runtime.add_item_rva)
-        .ok_or_else(|| "AddItem address overflow".to_string())?;
+        .checked_add(runtime.item_popup_rva)
+        .ok_or_else(|| "item-popup address overflow".to_string())?;
 
-    let target: AddItemFn = unsafe { std::mem::transmute(target_addr) };
+    let target: ItemPopupFn = unsafe { std::mem::transmute(target_addr) };
     let detour = unsafe {
-        GenericDetour::<AddItemFn>::new(target, add_item_detour)
-            .map_err(|e| format!("failed to create AddItem detour: {e}"))?
+        GenericDetour::<ItemPopupFn>::new(target, item_popup_detour)
+            .map_err(|e| format!("failed to create item-popup detour: {e}"))?
     };
 
     HOOK.set(detour)
-        .map_err(|_| "AddItem hook initialized twice".to_string())?;
+        .map_err(|_| "item-panel hook initialized twice".to_string())?;
 
     unsafe {
         HOOK.get()
             .expect("hook was just stored")
             .enable()
-            .map_err(|e| format!("failed to enable AddItem detour: {e}"))?;
+            .map_err(|e| format!("failed to enable item-panel detour: {e}"))?;
     }
 
     Ok(())
 }
 
-unsafe extern "C" fn add_item_detour(
-    inventory: *mut c_void,
-    entry: *mut c_void,
-    item_buf: *mut c_void,
-    r9: u64,
-) -> u64 {
+unsafe extern "C" fn item_popup_detour(manager: *mut c_void, entry: *mut c_void) -> u64 {
     let raw_id = if entry.is_null() {
         0
     } else {
-        unsafe { ((entry as *const u8).add(ENTRY_ID_OFFSET) as *const u32).read_unaligned() }
+        unsafe { ((entry as *const u8).add(POPUP_ID_OFFSET) as *const u32).read_unaligned() }
     };
 
     let quantity = if entry.is_null() {
         1
     } else {
-        unsafe { ((entry as *const u8).add(ENTRY_QUANTITY_OFFSET) as *const i32).read_unaligned() }
+        unsafe { ((entry as *const u8).add(POPUP_QUANTITY_OFFSET) as *const i32).read_unaligned() }
             .max(1)
     };
-
-    // Elden Ring's own save-backed inventory is the source of truth.  Capture the item before and
-    // after the game handles the acquisition so repeated stack pickups do not create lore cards.
-    let inventory_base = runtime::player_inventory();
-    let before = inventory_base
-        .map(|base| unsafe { inventory_state(base, raw_id) })
-        .unwrap_or_default();
+    let gem = if entry.is_null() {
+        0
+    } else {
+        unsafe { ((entry as *const u8).add(POPUP_GEM_OFFSET) as *const u32).read_unaligned() }
+    };
 
     let ret = HOOK
         .get()
-        .map(|hook| unsafe { hook.call(inventory, entry, item_buf, r9) })
+        .map(|hook| unsafe { hook.call(manager, entry) })
         .unwrap_or(0);
 
-    let after = inventory_base
-        .map(|base| unsafe { inventory_state(base, raw_id) })
-        .unwrap_or_default();
-    // A newly-created row is the transition that drives the game's first-acquisition panel.
-    // Do not admit an IsNew-only transition: that flag is also used by the inventory UI and may
-    // be reset when the player inspects an item, so using it alone could re-admit repeat pickups.
-    let new_row = before.readable && after.readable && !before.exists && after.exists;
-    let confirmed_new = new_row;
-
     runtime::log_line(&format!(
-        "LorePickup: acquisition raw={raw_id:#x}, inventory={inventory_base:?}, before={before:?}, after={after:?}, new_row={new_row}, confirmed_new={confirmed_new}."
+        "LorePickup: Y-dismissable item panel raw={raw_id:#x}, quantity={quantity}, gem={gem:#x}."
     ));
 
-    if confirmed_new {
-        let _ = std::panic::catch_unwind(|| process_pickup(raw_id, quantity));
-    }
+    let _ = std::panic::catch_unwind(|| process_popup(raw_id, quantity));
 
     ret
 }
 
-unsafe fn inventory_state(base: usize, raw_id: u32) -> InventoryState {
-    if raw_id == 0 || !plausible_address(base) {
-        return InventoryState::default();
-    }
-
-    let mut state = InventoryState::default();
-    let mut valid_lists = 0usize;
-
-    for list_offset in INVENTORY_LIST_OFFSETS {
-        let list = base + list_offset;
-        let capacity = ((list + LIST_CAPACITY_OFFSET) as *const u32).read_unaligned() as usize;
-        let entry_count =
-            ((list + LIST_ENTRY_COUNT_OFFSET) as *const u32).read_unaligned() as usize;
-        let entries = ((list + LIST_POINTER_OFFSET) as *const usize).read_unaligned();
-
-        if capacity == 0 && entry_count == 0 {
-            valid_lists += 1;
-            continue;
-        }
-        if capacity > MAX_INVENTORY_CAPACITY
-            || entry_count > capacity
-            || (capacity > 0 && !plausible_address(entries))
-        {
-            continue;
-        }
-        valid_lists += 1;
-        if entry_count == 0 {
-            continue;
-        }
-
-        let mut occupied = 0usize;
-        for index in 0..capacity {
-            let row = entries + index * INVENTORY_ENTRY_SIZE;
-            let item_id = ((row + INVENTORY_ENTRY_ID_OFFSET) as *const u32).read_unaligned();
-            if item_id == 0 || item_id == u32::MAX {
-                continue;
-            }
-            occupied += 1;
-            if item_id == raw_id {
-                state.exists = true;
-                state.is_new |=
-                    ((row + INVENTORY_ENTRY_IS_NEW_OFFSET) as *const i32).read_unaligned() != 0;
-            }
-            if occupied >= entry_count {
-                break;
-            }
-        }
-    }
-
-    state.readable = valid_lists > 0;
-    state
-}
-
-fn plausible_address(address: usize) -> bool {
-    (0x1_0000..=0x0000_7FFF_FFFF_FFFF).contains(&address)
-}
-
-fn process_pickup(raw_id: u32, quantity: i32) {
+fn process_popup(raw_id: u32, quantity: i32) {
     if raw_id == 0 {
         return;
     }

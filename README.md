@@ -1,27 +1,28 @@
 # EldenRingLorePickup
 
-A small Elden Ring quality-of-life mod: when Elden Ring presents its own first-acquisition item dialog, the item's actual in-game lore description appears on a non-blocking card at the right side of the screen.
+A small Elden Ring quality-of-life mod: whenever Elden Ring presents the large item panel that must
+be dismissed with Y/OK, the item's actual in-game lore description appears on a non-blocking card
+at the right side of the screen.
 
 The aim is simple: Elden Ring hides a huge amount of its story in item descriptions, but the normal pickup flow makes those descriptions easy to miss. LorePickup puts the description in front of you at the moment it is contextually useful, without opening the inventory or pausing play.
 
 ## Current status
 
-**Early alpha. v0.6.3 fixes the inventory-pointer and live-capture failures found in v0.6.1 and
-v0.6.2. It now follows Elden Ring's save-backed inventory pointer correctly and opens a card only
-when AddItem creates a new inventory row. The card remains readable
-independently of the short pickup log.**
+**Early alpha. v0.7.0 hooks Elden Ring's large item-panel function directly. It no longer guesses
+from inventory state or tries to capture the HDR game window: if the game creates the Y/OK panel,
+the card opens, whether or not the item is technically new. The card remains readable independently
+of the short pickup log.**
 
 The first implementation is now in this repository. It:
 
 - builds as a native Windows DLL for ModEngine3;
-- hooks Elden Ring's item-add path rather than polling the inventory;
+- hooks Elden Ring's Y-dismissable item-panel path rather than polling the inventory;
 - reads item names and descriptions from Elden Ring's live message repository, so it uses the game's current language;
 - supports weapons, armour, talismans, goods and Ashes of War;
 - searches base-game, DLC1 and DLC2 message tables;
-- compares the save-backed inventory before and after AddItem and opens a card only when the game
-  creates a new entry;
-- leaves first-acquisition memory to the game's persistent per-character state rather than a
-  per-launch mod list or an HDR-sensitive screen capture;
+- receives the exact item ID and quantity used by the large panel, including panels for items the
+  inventory does not regard as newly created;
+- ignores ordinary small right-side pickup logs because they never call the large-panel function;
 - uses a click-through Win32 overlay window above the game's pickup strip, with no DirectX Present hook;
 - resolves each pickup's live `iconId` from the game's parameter repository, with a built-in
   base-game mapping fallback;
@@ -30,7 +31,7 @@ The first implementation is now in this repository. It:
 ## Download
 
 Download the ready-to-install package from the
-[v0.6.3 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.6.3).
+[v0.7.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.7.0).
 It contains the DLL, illustrated card asset and complete compact icon folder.
 
 The runtime addresses currently cover the 2.6.2.0, 2.7.0.0 and 2.7.1.0 executable families used by the current 1.17-era modding stack. Signature checks are mandatory before either hook or message lookup is used.
@@ -76,15 +77,15 @@ ME3 resolves native paths relative to the .me3 profile.
 
 ## Behaviour
 
-The v0.6.3 card:
+The v0.7.0 card:
 
-- appears only when Elden Ring creates a new inventory entry;
+- appears exactly when Elden Ring creates its large Y/OK item panel;
 - remains available for up to 30 seconds instead of inheriting the one-to-two-second lifetime of
   the right-side pickup log;
 - is dismissed by controller **Y**, with release-edge protection so the pickup press cannot also
   dismiss the new card immediately;
-- uses a tall, hand-aged light vellum illustration with ragged transparent edges, wear, stains and
-  restrained gilded ornament; dark sepia ink replaces outlined white overlay text;
+- uses a larger, wider, smoke-darkened vellum object with ragged transparent edges, fine physical
+  wear and restrained damaged gold leaf; ivory and muted-gold type replaces black printed text;
 - keeps the artwork translucent while its Garamond typography and inventory icon remain opaque;
 - shows the item's actual inventory thumbnail in a small gilded tile, with a category medallion
   fallback if a custom/modded icon is not supplied;
@@ -92,10 +93,12 @@ The v0.6.3 card:
   guidance; and crafting outputs for ingredients where the recipe params expose them;
 - groups only genuine paragraph breaks and flows wrapped lines as a single paragraph;
 - stacks queued new-item cards visibly behind the current card;
-- closes with a smooth short fade, with no pixel-grid or coarse particle dissolve;
+- closes over 920 ms with 480 individually drawn one-to-two-pixel rune motes and short gold trails,
+  moving left and upward from the card without scaled particle bitmaps or a coarse grid;
 - composes each card off-screen and presents it atomically to prevent transparency flicker;
 - completely hides the overlay window when there is no lore to show;
-- rejects repeat pickups before they enter the card queue.
+- ignores repeat pickups that produce only the small right-side log, while accepting any repeat
+  item for which the game itself opens the large Y/OK panel.
 
 The DLL looks for the card artwork beside itself as `EldenRingLorePickup-card.png` and thumbnails
 in `EldenRingLorePickup-icons`. The release archive ships both ready to use. Icon selection prefers
@@ -109,7 +112,7 @@ unlocks Poison, Blood and Occult and how those choices alter Arcane scaling and 
 
 ## Compatibility note
 
-LorePickup deliberately does **not** hook DirectX. The original v0.1 DX12/ImGui renderer prevented the user's ERSS/OptiScaler stack from reaching the game. The replacement is a pair of transparent, click-through Win32 overlay windows aligned to Elden Ring's client area. The lower layer controls only the illustrated card's translucency; the upper layer keeps text and icon opaque. The card observes XInput Y without consuming it, and the AddItem hook is delayed for eight seconds after startup so it does not participate in the game's native-mod initialization burst.
+LorePickup deliberately does **not** hook DirectX. The original v0.1 DX12/ImGui renderer prevented the user's ERSS/OptiScaler stack from reaching the game. The replacement is a pair of transparent, click-through Win32 overlay windows aligned to Elden Ring's client area. The lower layer controls only the illustrated card's translucency; the upper layer keeps text and icon opaque. The card observes XInput Y without consuming it, and the item-panel hook is delayed for eight seconds after startup so it does not participate in the game's native-mod initialization burst.
 
 The log is written as `EldenRingLorePickup.log` in Elden Ring's working directory.
 
@@ -117,14 +120,11 @@ Use offline / with ModEngine3's normal official-online protection. Native gamepl
 
 ## Technical notes
 
-Pickup data is based on Elden Ring's AddItem function and a before/after comparison of the game's
-save-backed inventory. `PlayerGameData + 0x5D0` contains a pointer to `EquipInventoryData`; the
-mod follows that pointer and accepts only an absent-to-present row. The separate `isNew` field is
-logged for diagnosis but is not trusted by itself because the inventory UI can clear it. Repeat stack
-pickups therefore never enter the card queue, and no HDR-sensitive screen
-capture is involved. The item ID encodes its category in the high nibble. LorePickup calls the
-game's own SearchStringTable against the live MsgRepository and chooses the appropriate FMG
-categories:
+Pickup data comes from the game's dedicated large item-panel function. Its input structure contains
+the raw item ID, quantity and gem ID, so the mod observes the same decision the game has already
+made instead of reconstructing it from inventory state or screen pixels. The item ID encodes its
+category in the high nibble. LorePickup calls the game's own SearchStringTable against the live
+MsgRepository and chooses the appropriate FMG categories:
 
 - Goods: name 10, info 20, caption 24
 - Weapons: name 11, info 21, caption 25

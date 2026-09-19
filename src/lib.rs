@@ -47,7 +47,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.6.3 bootstrap: save-backed NEW-item gating and persistent lore cards; no DirectX hooks.",
+            "LorePickup v0.7.0 bootstrap: exact Y-dismissable item-panel hook and rebuilt lore cards; no DirectX hooks.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
@@ -76,9 +76,9 @@ pub unsafe extern "system" fn DllMain(
             runtime::log_line("LorePickup: Win32 overlay thread started.");
         }
 
-        // Avoid touching AddItem while Elden Ring, ERSS and the rest of the native stack are
+        // Avoid touching the item-panel path while Elden Ring, ERSS and the rest of the native stack are
         // still initialising. Missing startup grants is harmless; world pickups happen later.
-        runtime::log_line("LorePickup: waiting 8 seconds before installing item hook.");
+        runtime::log_line("LorePickup: waiting 8 seconds before installing item-panel hook.");
         thread::sleep(Duration::from_secs(8));
 
         if let Err(err) = pickup::install() {
@@ -86,7 +86,9 @@ pub unsafe extern "system" fn DllMain(
             return;
         }
 
-        runtime::log_line("LorePickup: item hook installed; ready for pickups.");
+        runtime::log_line(
+            "LorePickup: item-panel hook installed; ready for Y-dismissable pickups.",
+        );
     });
 
     true

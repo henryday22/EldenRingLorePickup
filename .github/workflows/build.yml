@@ -51,33 +51,33 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.3.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.7.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.6.3
-          path: EldenRingLorePickup-v0.6.3.zip
+          name: EldenRingLorePickup-v0.7.0
+          path: EldenRingLorePickup-v0.7.0.zip
 
-      - name: Publish v0.6.3 release
+      - name: Publish v0.7.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.3
+          tag_name: v0.7.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.6.3 — Correct Save-Backed New-Item Detection
+          name: LorePickup v0.7.0 — Exact Y-Panel Trigger and Rebuilt Card
           body: |
-            Corrective release for v0.6.2's missing cards. The supplied log proved that the DLL loaded and staged Radahn's Great Rune, Ash of War: Golden Slam and Icon Shield, but the live GDI capture could not see the HDR game surface and every candidate expired.
+            This revision replaces all inferred pickup gating with a direct hook into Elden Ring's large item-panel function. If the game opens the panel that must be dismissed with Y/OK, LorePickup receives the same item ID and opens a card. This includes panels for repeat or otherwise non-new items such as Soft Cotton. Small right-side pickup logs do not call this function and remain ignored.
 
-            The log also exposed the underlying inventory bug: `PlayerGameData + 0x5D0` contains a pointer to `EquipInventoryData`, while v0.6.1/v0.6.2 treated that field's address as the inventory itself. v0.6.3 follows the pointer correctly and compares the game's save-backed inventory before and after AddItem. A card is admitted only for an absent-to-present row. The inventory UI's separate `isNew` flag is logged but is not trusted by itself, so repeat stack pickups are rejected without using screen capture.
+            The item-panel address is found by a checked executable signature and the mod remains inert if it cannot be resolved uniquely. Inventory state and HDR-sensitive screen capture are no longer used to decide whether a card should appear.
 
-            Cards remain readable for up to 30 seconds and dismiss on a fresh controller Y press after the pickup button has been released. Multiple new items form a visible deck and advance in order. The presentation now uses a lighter hand-aged vellum surface with dark sepia ink, consistent paragraph spacing and a smooth fade without the coarse particle effect.
+            The card artwork has been rebuilt as a larger and wider smoke-darkened vellum object with restrained damaged gold leaf. Typography is now ivory and muted gold, with more room for the title and lore. The old plain fade is replaced by a 920 ms field of 480 individually drawn tiny rune motes and short gold trails; there are no scaled particle sprites or coarse blocks. Only the moving foreground is repainted during dismissal to protect the game image from transparency flicker.
 
             The full icon bundle is included. Cards retain live weapon requirements, affinity, base attack and Ash of War, armour/talisman guidance and ingredient recipe outputs. Whetblades now explain exactly which affinities they unlock and which stats those affinities favour, including Poison/Blood/Occult guidance for the Black Whetblade.
 
-            Extract the DLL, `EldenRingLorePickup-card.png`, and the complete `EldenRingLorePickup-icons` folder into `profiles/natives/EldenRingLorePickup/`. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup/EldenRingLorePickup.dll`.
-          files: EldenRingLorePickup-v0.6.3.zip
+            Replace both the DLL and `EldenRingLorePickup-card.png` in `profiles/natives/EldenRingLorePickup/`. The icon folder and `.me3` profile do not need to change.
+          files: EldenRingLorePickup-v0.7.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

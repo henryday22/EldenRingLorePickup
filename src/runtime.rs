@@ -20,11 +20,10 @@ const SEARCH_SIG: &[u8] = &[
 #[derive(Clone, Copy, Debug)]
 pub struct GameRuntime {
     pub base: usize,
-    pub add_item_rva: usize,
+    pub item_popup_rva: usize,
     pub fmg_repo_rva: usize,
     pub fmg_search_rva: usize,
     pub solo_param_slot: usize,
-    pub game_data_man_slot: usize,
     pub label: &'static str,
 }
 
@@ -86,39 +85,26 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
         if signature_matches(base + candidate.add_item_rva, ADD_ITEM_SIG)
             && signature_matches(base + candidate.fmg_search_rva, SEARCH_SIG)
         {
+            let Some(item_popup_rva) = find_item_popup_rva(base) else {
+                continue;
+            };
             let found = GameRuntime {
                 base,
-                add_item_rva: candidate.add_item_rva,
+                item_popup_rva,
                 fmg_repo_rva: candidate.fmg_repo_rva,
                 fmg_search_rva: candidate.fmg_search_rva,
                 solo_param_slot: find_solo_param_slot(base).unwrap_or(0),
-                game_data_man_slot: find_game_data_man_slot(base).unwrap_or(0),
                 label: candidate.label,
             };
             log_line(&format!(
-                "LorePickup: matched {} (base={:#x}, params={:#x}, game_data={:#x}).",
-                found.label, found.base, found.solo_param_slot, found.game_data_man_slot
+                "LorePickup: matched {} (base={:#x}, item_popup={:#x}, params={:#x}).",
+                found.label, found.base, found.item_popup_rva, found.solo_param_slot
             ));
             return Ok(found);
         }
     }
 
     Err("known item/message signatures not present".to_string())
-}
-
-/// Resolves the player's embedded EquipInventoryData from the game's persistent save-backed
-/// GameDataMan. This is intentionally independent of the transient AddItem call arguments.
-pub fn player_inventory() -> Option<usize> {
-    let runtime = RUNTIME.get()?;
-    unsafe {
-        let game_data_man = read_ptr(runtime.game_data_man_slot)?;
-        let player_game_data = read_ptr(game_data_man.checked_add(0x08)?)?;
-        // PlayerGameData stores a pointer to EquipInventoryData at +0x5D0.  The previous
-        // implementation returned the address of this field instead of following it, which made
-        // every inventory list look corrupt and forced the overlay onto its unreliable visual
-        // fallback.
-        read_ptr(player_game_data.checked_add(0x5D0)?)
-    }
 }
 
 /// Reads the current row's `iconId` from the game's live parameter repository. This keeps
@@ -611,24 +597,30 @@ fn find_solo_param_slot(base: usize) -> Option<usize> {
     (instruction + 7).checked_add_signed(displacement)
 }
 
-fn find_game_data_man_slot(base: usize) -> Option<usize> {
-    // 48 8B 05 ?? ?? ?? ?? 48 85 C0 74 05 48 8B 40 58 C3 C3
+fn find_item_popup_rva(base: usize) -> Option<usize> {
+    // The game's large item-acquisition panel calls this function with (MapItemMan + 0xA0,
+    // ItemPopupEntry*). The Grand Archives signature begins 0x14 bytes into the function:
+    // ?? 8B FA ?? 8B D9 ?? 8B 81 A8 00 00 00
     const PATTERN: &[i16] = &[
-        0x48, 0x8B, 0x05, -1, -1, -1, -1, 0x48, 0x85, 0xC0, 0x74, 0x05, 0x48, 0x8B, 0x40, 0x58,
-        0xC3, 0xC3,
+        -1, 0x8B, 0xFA, -1, 0x8B, 0xD9, -1, 0x8B, 0x81, 0xA8, 0x00, 0x00, 0x00,
     ];
-
     let (text, size) = pe_text_section(base)?;
     let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, size) };
-    let offset = bytes.windows(PATTERN.len()).position(|window| {
-        window
-            .iter()
-            .zip(PATTERN)
-            .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
-    })?;
-    let instruction = text.checked_add(offset)?;
-    let displacement = unsafe { ((instruction + 3) as *const i32).read_unaligned() } as isize;
-    (instruction + 7).checked_add_signed(displacement)
+    let mut matches = bytes
+        .windows(PATTERN.len())
+        .enumerate()
+        .filter_map(|(offset, window)| {
+            window
+                .iter()
+                .zip(PATTERN)
+                .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
+                .then_some(offset)
+        });
+    let offset = matches.next()?;
+    if matches.next().is_some() || offset < 0x14 {
+        return None;
+    }
+    text.checked_add(offset - 0x14)?.checked_sub(base)
 }
 
 fn pe_text_section(base: usize) -> Option<(usize, usize)> {

@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 const FADE_IN: Duration = Duration::from_millis(180);
-const FADE_OUT: Duration = Duration::from_millis(360);
+const FADE_OUT: Duration = Duration::from_millis(920);
 const MAX_CARD_LIFETIME: Duration = Duration::from_secs(30);
 const DISMISS_ARM_DELAY: Duration = Duration::from_millis(180);
 const PANEL_ALPHA: u8 = 224;
@@ -334,11 +334,16 @@ fn overlay_thread() -> Result<(), String> {
                 // The pixels do not change during the hold. Repainting the full-screen layered
                 // window every 16 ms caused GDI to expose its transparent clear between drawing
                 // passes, which looked like the game was flickering through the card.
-                let closing = snapshot.closing_age.is_some();
-                if painted_entry != Some(snapshot.shown_at) || alignment_changed || closing {
+                let new_card = painted_entry != Some(snapshot.shown_at);
+                if new_card || alignment_changed {
                     InvalidateRect(background, null(), 0);
                     InvalidateRect(content, null(), 0);
                     painted_entry = Some(snapshot.shown_at);
+                } else if snapshot.closing_age.is_some() {
+                    // Only the rune motes move. The background card is static and fades through
+                    // the layered-window alpha, so repainting it every frame would reintroduce
+                    // the transparency flicker this renderer was designed to avoid.
+                    InvalidateRect(content, null(), 0);
                 }
             } else {
                 // The overlay is a real absence when idle, not an invisible full-screen window.
@@ -619,19 +624,19 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     let scale = (height as f32 / 2160.0).clamp(0.58, 1.35);
     let px = |at_4k: f32| (at_4k * scale).round() as i32;
 
-    let panel_width = ((width as f32 * 0.19).round() as i32)
-        .clamp(px(590.0), px(820.0))
-        .min((height as f32 * 0.42).round() as i32)
+    let panel_width = ((width as f32 * 0.235).round() as i32)
+        .clamp(px(700.0), px(980.0))
+        .min((height as f32 * 0.58).round() as i32)
         .min(width - px(100.0));
     let margin_right = px(66.0);
-    let pad_x = px(58.0);
-    let pad_top = px(50.0);
-    let pad_bottom = px(62.0);
-    let icon_size = px(130.0).max(64);
+    let pad_x = px(66.0);
+    let pad_top = px(62.0);
+    let pad_bottom = px(66.0);
+    let icon_size = px(148.0).max(72);
     let icon_gap = px(30.0);
-    let title_size = px(47.0).max(23);
-    let body_size = px(35.0).max(18);
-    let detail_size = px(27.0).max(14);
+    let title_size = px(56.0).max(27);
+    let body_size = px(41.0).max(20);
+    let detail_size = px(31.0).max(15);
     let title_gap = px(25.0);
     let rule_gap = px(25.0);
     let text_width = panel_width - pad_x * 2;
@@ -736,7 +741,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         + details_height
         + pad_bottom;
     let panel_height = natural_height
-        .max((panel_width as f32 * 1.50) as i32)
+        .max((panel_width as f32 * 1.40) as i32)
         .min(height - px(90.0));
     let right = width - margin_right;
     // Elden Ring's pickup strip sits at the lower-right. End the lore card just above it.
@@ -814,19 +819,19 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y + ((title_height - measure_text(hdc, &entry.name, title_width)) / 2).max(0),
         text_right,
         y + title_height,
-        fade_colour(55, 38, 25, ink),
+        fade_colour(232, 224, 202, ink),
         0,
     );
     y += title_height + title_gap;
 
     let old_pen = SelectObject(
         hdc,
-        CreatePen(PS_SOLID, px(2.0).max(1), fade_colour(133, 105, 59, ink)),
+        CreatePen(PS_SOLID, px(2.0).max(1), fade_colour(157, 126, 72, ink)),
     );
     MoveToEx(hdc, text_left, y, null_mut());
     LineTo(hdc, text_right, y);
     let ornament = px(9.0).max(4);
-    let ornament_brush = CreateSolidBrush(fade_colour(133, 105, 59, ink));
+    let ornament_brush = CreateSolidBrush(fade_colour(157, 126, 72, ink));
     let old_brush = SelectObject(hdc, ornament_brush);
     Ellipse(
         hdc,
@@ -856,13 +861,13 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y,
         text_right,
         paragraph_gap,
-        fade_colour(59, 44, 31, ink),
-        0,
+        fade_colour(221, 214, 195, ink),
+        px(1.0),
     );
 
     if !entry.details.is_empty() {
         y += px(23.0);
-        let separator = CreatePen(PS_SOLID, px(1.0).max(1), fade_colour(92, 75, 47, ink));
+        let separator = CreatePen(PS_SOLID, px(1.0).max(1), fade_colour(135, 108, 66, ink));
         let previous = SelectObject(hdc, separator);
         MoveToEx(hdc, text_left, y, null_mut());
         LineTo(hdc, text_right, y);
@@ -879,11 +884,15 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
                 y,
                 text_right,
                 y + line_height,
-                fade_colour(91, 64, 35, ink),
-                0,
+                fade_colour(190, 157, 96, ink),
+                px(1.0),
             );
             y += line_height + detail_gap;
         }
+    }
+
+    if let Some(closing_age) = snapshot.closing_age {
+        draw_rune_sparks(hdc, &panel, closing_age, px);
     }
 
     SelectObject(hdc, old_font);
@@ -896,6 +905,72 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     if !detail_font.is_null() {
         DeleteObject(detail_font);
     }
+}
+
+/// A dense field of tiny deterministic motes inspired by Elden Ring's rune wisps.  The particles
+/// are one or two physical pixels at normal play resolutions, with short tapered-looking trails;
+/// no coarse grid, blocks or bitmap scaling are involved.
+unsafe fn draw_rune_sparks(hdc: HDC, panel: &RECT, age: Duration, px: impl Fn(f32) -> i32 + Copy) {
+    let progress = (age.as_secs_f32() / FADE_OUT.as_secs_f32()).clamp(0.0, 1.0);
+    let panel_width = (panel.right - panel.left).max(1);
+    let panel_height = (panel.bottom - panel.top).max(1);
+
+    let pens = [
+        CreatePen(PS_SOLID, 1, rgb(102, 75, 30)),
+        CreatePen(PS_SOLID, 1, rgb(181, 132, 48)),
+        CreatePen(PS_SOLID, px(2.0).max(1), rgb(238, 196, 89)),
+    ];
+    let original_pen = SelectObject(hdc, pens[0]);
+
+    for index in 0..480u32 {
+        let h1 = spark_hash(index.wrapping_mul(4).wrapping_add(1));
+        let h2 = spark_hash(index.wrapping_mul(4).wrapping_add(2));
+        let h3 = spark_hash(index.wrapping_mul(4).wrapping_add(3));
+        let h4 = spark_hash(index.wrapping_mul(4).wrapping_add(4));
+        let unit = |value: u32| value as f32 / u32::MAX as f32;
+
+        let delay = unit(h4) * 0.38;
+        if progress <= delay {
+            continue;
+        }
+        let local = ((progress - delay) / (1.0 - delay)).clamp(0.0, 1.0);
+        let life = (1.0 - local).powf(0.72);
+        if life < 0.06 {
+            continue;
+        }
+
+        let start_x = panel.left as f32 + unit(h1) * panel_width as f32;
+        let start_y = panel.top as f32 + unit(h2) * panel_height as f32;
+        let sweep = px(120.0 + unit(h3) * 430.0) as f32;
+        let rise = px(35.0 + unit(h4.rotate_left(11)) * 245.0) as f32;
+        let flutter = ((local * 9.0 + unit(h1.rotate_left(7)) * 6.283).sin())
+            * px(15.0 + unit(h2.rotate_left(9)) * 32.0) as f32;
+        let x = start_x - sweep * local.powf(1.18);
+        let y = start_y - rise * local + flutter;
+        let trail = px(2.0 + unit(h3.rotate_left(13)) * 9.0).max(1) as f32;
+
+        let brightness = ((unit(h2.rotate_left(5)) * 3.0) as usize).min(2);
+        SelectObject(hdc, pens[brightness]);
+        MoveToEx(hdc, x.round() as i32, y.round() as i32, null_mut());
+        LineTo(
+            hdc,
+            (x + trail * life).round() as i32,
+            (y + trail * 0.16 * life).round() as i32,
+        );
+    }
+
+    SelectObject(hdc, original_pen);
+    for pen in pens {
+        DeleteObject(pen);
+    }
+}
+
+fn spark_hash(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    value ^ (value >> 16)
 }
 
 fn fade_colour(r: u8, g: u8, b: u8, opacity: f32) -> u32 {
