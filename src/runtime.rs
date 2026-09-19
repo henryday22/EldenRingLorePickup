@@ -24,6 +24,7 @@ pub struct GameRuntime {
     pub fmg_repo_rva: usize,
     pub fmg_search_rva: usize,
     pub solo_param_slot: usize,
+    pub cs_fe_man_slot: usize,
     pub label: &'static str,
 }
 
@@ -32,6 +33,7 @@ struct Candidate {
     add_item_rva: usize,
     fmg_repo_rva: usize,
     fmg_search_rva: usize,
+    cs_fe_man_rva: usize,
     label: &'static str,
 }
 
@@ -40,18 +42,21 @@ const CANDIDATES: &[Candidate] = &[
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FC40,
+        cs_fe_man_rva: 0x03D6_B880,
         label: "ER 2.7.1.0 / 1.17-era",
     },
     Candidate {
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FBD0,
+        cs_fe_man_rva: 0x03D6_B880,
         label: "ER 2.7.0.0 / Tarnished Edition",
     },
     Candidate {
         add_item_rva: 0x0056_05B0,
         fmg_repo_rva: 0x03D7_D4F8,
         fmg_search_rva: 0x0266_D3C0,
+        cs_fe_man_rva: 0,
         label: "ER 2.6.2.0",
     },
 ];
@@ -94,17 +99,49 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
                 fmg_repo_rva: candidate.fmg_repo_rva,
                 fmg_search_rva: candidate.fmg_search_rva,
                 solo_param_slot: find_solo_param_slot(base).unwrap_or(0),
+                cs_fe_man_slot: find_cs_fe_man_slot(base).unwrap_or_else(|| {
+                    if candidate.cs_fe_man_rva == 0 {
+                        0
+                    } else {
+                        base + candidate.cs_fe_man_rva
+                    }
+                }),
                 label: candidate.label,
             };
             log_line(&format!(
-                "LorePickup: matched {} (base={:#x}, item_popup={:#x}, params={:#x}).",
-                found.label, found.base, found.item_popup_rva, found.solo_param_slot
+                "LorePickup: matched {} (base={:#x}, item_popup={:#x}, params={:#x}, fe_man={:#x}).",
+                found.label,
+                found.base,
+                found.item_popup_rva,
+                found.solo_param_slot,
+                found.cs_fe_man_slot
             ));
             return Ok(found);
         }
     }
 
     Err("known item/message signatures not present".to_string())
+}
+
+/// Returns whether Elden Ring is currently in its blocking popup-menu HUD state.
+///
+/// The large item panel that waits for Y/OK uses `CSFeManHudState::PopupMenu` (2).
+/// Ordinary right-side pickup logs leave the HUD in `Default` (3). Reading this one-byte
+/// state lets the game make the presentation decision; LorePickup only follows it.
+pub fn item_panel_visible() -> Option<bool> {
+    let runtime = RUNTIME.get()?;
+    if runtime.cs_fe_man_slot == 0 {
+        return None;
+    }
+
+    unsafe {
+        let fe_man = read_ptr(runtime.cs_fe_man_slot)?;
+        match read_u8(fe_man.checked_add(0x78)?)? {
+            2 => Some(true),
+            0 | 1 | 3 => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// Reads the current row's `iconId` from the game's live parameter repository. This keeps
@@ -175,7 +212,11 @@ pub fn lookup_item_details(category: u32, param_id: u32, info: Option<&str>) -> 
     if let Some(summary) = info.map(str::trim).filter(|text| !text.is_empty()) {
         let summary = compact_summary(&summary.replace(['\r', '\n'], " "), 180);
         if !lines.iter().any(|line| line.contains(&summary)) {
-            lines.insert(0, format!("EFFECT  {summary}"));
+            if category == 0x0000_0000 {
+                lines.push(format!("EFFECT  {summary}"));
+            } else {
+                lines.insert(0, format!("EFFECT  {summary}"));
+            }
         }
     }
     lines
@@ -240,12 +281,12 @@ fn weapon_details(param_id: u32) -> Vec<String> {
         };
 
         let affinity = affinity_label(param_id);
-        let mut lines = vec![format!("BUILD  {build}"), format!("AFFINITY  {affinity}")];
+        let mut lines = vec![format!("AFFINITY  {affinity}")];
         if !req.is_empty() {
-            lines.push(format!("REQUIRES  {}", req.join(" · ")));
+            lines.push(format!("REQUIREMENTS  {}", req.join(" · ")));
         }
         if !affinities.is_empty() {
-            lines.push(format!("BASE ATTACK  {}", affinities.join(" · ")));
+            lines.push(format!("DAMAGE  {}", affinities.join(" · ")));
         }
         if let Some(arts_id) = read_i32(row + 0x198).filter(|&id| id > 0) {
             if let Some(runtime) = RUNTIME.get() {
@@ -254,6 +295,7 @@ fn weapon_details(param_id: u32) -> Vec<String> {
                 }
             }
         }
+        lines.push(format!("BEST FOR  {build}"));
         lines
     }
 }
@@ -592,6 +634,37 @@ fn find_solo_param_slot(base: usize) -> Option<usize> {
             .zip(PATTERN)
             .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
     })?;
+    let instruction = text.checked_add(offset)?;
+    let displacement = unsafe { ((instruction + 3) as *const i32).read_unaligned() } as isize;
+    (instruction + 7).checked_add_signed(displacement)
+}
+
+fn find_cs_fe_man_slot(base: usize) -> Option<usize> {
+    // mov rcx,[CSFeManImp]; mov ebx,edx; test rcx,rcx; jne ...
+    // Publicly used by Erd-Tools and other native Elden Ring tooling. The first instruction's
+    // RIP target is a `CSFeManImp*` slot. Keep the checked 1.17 RVA fallback above as a second
+    // independent anchor for the executable family used by the current game.
+    const PATTERN: &[i16] = &[
+        0x48, 0x8B, 0x0D, -1, -1, -1, -1, 0x8B, 0xDA, 0x48, 0x85, 0xC9, 0x75, -1, 0x48,
+        0x8D, 0x0D, -1, -1, -1, -1, 0xE8, -1, -1, -1, -1, 0x4C, 0x8B, 0xC8,
+    ];
+
+    let (text, size) = pe_text_section(base)?;
+    let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, size) };
+    let mut matches = bytes
+        .windows(PATTERN.len())
+        .enumerate()
+        .filter_map(|(offset, window)| {
+            window
+                .iter()
+                .zip(PATTERN)
+                .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
+                .then_some(offset)
+        });
+    let offset = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
     let instruction = text.checked_add(offset)?;
     let displacement = unsafe { ((instruction + 3) as *const i32).read_unaligned() } as isize;
     (instruction + 7).checked_add_signed(displacement)

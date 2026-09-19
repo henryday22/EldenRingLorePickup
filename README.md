@@ -1,130 +1,123 @@
 # EldenRingLorePickup
 
-A small Elden Ring quality-of-life mod: whenever Elden Ring presents the large item panel that must
-be dismissed with Y/OK, the item's actual in-game lore description appears on a non-blocking card
-at the right side of the screen.
+A small Elden Ring quality-of-life mod. When Elden Ring opens its large item panel—the one that
+waits for **Y/OK**—LorePickup shows that item's in-game description and useful gameplay information
+in a clean panel at the right of the screen.
 
-The aim is simple: Elden Ring hides a huge amount of its story in item descriptions, but the normal pickup flow makes those descriptions easy to miss. LorePickup puts the description in front of you at the moment it is contextually useful, without opening the inventory or pausing play.
+The normal pickup flow makes Elden Ring's item lore easy to miss. LorePickup presents it at the
+moment it is useful without opening the inventory or pausing play.
 
-## Current status
+## Current release
 
-**Early alpha. v0.7.0 hooks Elden Ring's large item-panel function directly. It no longer guesses
-from inventory state or tries to capture the HDR game window: if the game creates the Y/OK panel,
-the card opens, whether or not the item is technically new. The card remains readable independently
-of the short pickup log.**
-
-The first implementation is now in this repository. It:
-
-- builds as a native Windows DLL for ModEngine3;
-- hooks Elden Ring's Y-dismissable item-panel path rather than polling the inventory;
-- reads item names and descriptions from Elden Ring's live message repository, so it uses the game's current language;
-- supports weapons, armour, talismans, goods and Ashes of War;
-- searches base-game, DLC1 and DLC2 message tables;
-- receives the exact item ID and quantity used by the large panel, including panels for items the
-  inventory does not regard as newly created;
-- ignores ordinary small right-side pickup logs because they never call the large-panel function;
-- uses a click-through Win32 overlay window above the game's pickup strip, with no DirectX Present hook;
-- resolves each pickup's live `iconId` from the game's parameter repository, with a built-in
-  base-game mapping fallback;
-- fails closed when the expected Elden Ring function signatures do not match.
-
-## Download
+**v0.8.0 replaces the illustrated card experiment with a compact modern interface and changes the
+trigger architecture.** The item hook now creates only a short-lived candidate. A card is shown
+only if Elden Ring itself enters its blocking popup-menu state. Ordinary right-side pickup logs do
+not meet that condition and are ignored.
 
 Download the ready-to-install package from the
-[v0.7.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.7.0).
-It contains the DLL, illustrated card asset and complete compact icon folder.
+[v0.8.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.8.0).
+It contains the DLL and the complete compact icon folder.
 
-The runtime addresses currently cover the 2.6.2.0, 2.7.0.0 and 2.7.1.0 executable families used by the current 1.17-era modding stack. Signature checks are mandatory before either hook or message lookup is used.
+## Features
 
-## Building
+- Uses Elden Ring's blocking popup state as the authority for whether a card should appear.
+- Accepts repeat items when the game itself gives them a large Y/OK panel.
+- Ignores routine pickups that produce only the small right-side log.
+- Reads names and lore from the game's live message repository in the game's current language.
+- Supports weapons, armour, talismans, goods and Ashes of War across base-game and DLC tables.
+- Resolves each item's live inventory icon, with a bundled mapping fallback.
+- Shows weapon affinity, attribute requirements, base damage, skill and likely build use.
+- Shows ingredient recipe outputs where the live recipe params expose them.
+- Explains the affinities and stat effects unlocked by each Whetblade.
+- Displays queued cards as a visible stack and advances them one Y press at a time.
+- Uses a short, clean fade with no simulated particle effect.
+- Uses no DirectX hook and hides its click-through overlay completely while idle.
+- Fails closed if the expected executable signatures do not match.
 
-Requirements for building the DLL locally:
+The runtime addresses currently cover the 2.6.2.0, 2.7.0.0 and 2.7.1.0 executable families used
+by the current 1.17-era modding stack. Signatures are checked before any hook or message lookup.
 
-- Windows 10/11
-- Rust stable (x86_64-pc-windows-msvc)
-- Visual Studio 2022 Build Tools / MSVC toolchain
+## Installation with ModEngine3
 
-Run:
-
-    cargo build --release
-
-The DLL is produced under target/release.
-
-GitHub Actions also builds the DLL on every push.
-
-## ModEngine3
-
-Place the built DLL in a natives folder next to your ME3 profile, for example:
+Extract the release so the DLL and icon folder sit together:
 
     profiles/
       eldenring-default.me3
       natives/
         EldenRingLorePickup/
           EldenRingLorePickup.dll
-          EldenRingLorePickup-card.png
           EldenRingLorePickup-icons/
             MENU_Knowledge_00000.png
             ...
 
-Then add this block to the profile:
+Add this block to the `.me3` profile if it is not already present:
 
     [[natives]]
     enabled = true
     load_early = false
     path = 'natives/EldenRingLorePickup/EldenRingLorePickup.dll'
 
-ME3 resolves native paths relative to the .me3 profile.
+If v0.7.0 is already installed, replace only `EldenRingLorePickup.dll`. Keep the icon folder and
+leave the `.me3` entry unchanged. `EldenRingLorePickup-card.png` is no longer read and may be
+deleted.
+
+ME3 resolves native paths relative to the `.me3` profile.
 
 ## Behaviour
 
-The v0.7.0 card:
+The v0.8.0 panel:
 
-- appears exactly when Elden Ring creates its large Y/OK item panel;
-- remains available for up to 30 seconds instead of inheriting the one-to-two-second lifetime of
-  the right-side pickup log;
-- is dismissed by controller **Y**, with release-edge protection so the pickup press cannot also
-  dismiss the new card immediately;
-- uses a larger, wider, smoke-darkened vellum object with ragged transparent edges, fine physical
-  wear and restrained damaged gold leaf; ivory and muted-gold type replaces black printed text;
-- keeps the artwork translucent while its Garamond typography and inventory icon remain opaque;
-- shows the item's actual inventory thumbnail in a small gilded tile, with a category medallion
-  fallback if a custom/modded icon is not supplied;
-- displays live weapon requirements, affinity, base attack and Ash of War; armour/talisman load
-  guidance; and crafting outputs for ingredients where the recipe params expose them;
-- groups only genuine paragraph breaks and flows wrapped lines as a single paragraph;
-- stacks queued new-item cards visibly behind the current card;
-- closes over 920 ms with 480 individually drawn one-to-two-pixel rune motes and short gold trails,
-  moving left and upward from the card without scaled particle bitmaps or a coarse grid;
-- composes each card off-screen and presents it atomically to prevent transparency flicker;
-- completely hides the overlay window when there is no lore to show;
-- ignores repeat pickups that produce only the small right-side log, while accepting any repeat
-  item for which the game itself opens the large Y/OK panel.
+- opens only when an item presentation candidate coincides with Elden Ring's large blocking popup;
+- remains paired with that game panel instead of inheriting the short right-side log lifetime;
+- observes the same controller **Y** press that dismisses the game panel without consuming it;
+- waits for Y to be released before arming the next queued card, preventing one held press from
+  skipping a stack;
+- shows up to two offset rear panels plus an exact remaining-card count when several items queue;
+- uses an opaque icon and text over a restrained translucent charcoal panel;
+- formats the original lore into consistent paragraphs and separates factual details into aligned
+  label/value rows;
+- fades in over 120 ms and out over 160 ms, with no low-resolution particle overlay;
+- has a 90-second safety timeout if the underlying game panel becomes stuck.
 
-The DLL looks for the card artwork beside itself as `EldenRingLorePickup-card.png` and thumbnails
-in `EldenRingLorePickup-icons`. The release archive ships both ready to use. Icon selection prefers
-a valid live parameter value, verifies that the corresponding PNG exists, and then falls back to
-the bundled base-game mapping. A zero live ID cannot mask a valid mapped item icon.
+Weapon information deliberately prioritises affinity, requirements, damage and skill. Defensive
+resistances are not shown. Armour and talisman information remains limited to concise weight/use
+guidance. Ingredients list up to four known crafting outputs.
 
-Practical information is derived from live params where possible. Weapons show build tendency,
-requirements, affinity, base attack and skill; ingredients list up to four known recipe outputs.
-Whetblades include curated affinity guidance—for example, the Black Whetblade explains that it
-unlocks Poison, Blood and Occult and how those choices alter Arcane scaling and status buildup.
+## Compatibility and log
 
-## Compatibility note
+LorePickup deliberately does **not** hook DirectX. It uses two transparent, click-through Win32
+overlay windows aligned to Elden Ring's client area. The lower layer provides the translucent panel;
+the upper layer keeps text and icons opaque. The item hook is delayed for eight seconds so it does
+not join the native-mod initialisation burst.
 
-LorePickup deliberately does **not** hook DirectX. The original v0.1 DX12/ImGui renderer prevented the user's ERSS/OptiScaler stack from reaching the game. The replacement is a pair of transparent, click-through Win32 overlay windows aligned to Elden Ring's client area. The lower layer controls only the illustrated card's translucency; the upper layer keeps text and icon opaque. The card observes XInput Y without consuming it, and the item-panel hook is delayed for eight seconds after startup so it does not participate in the game's native-mod initialization burst.
+The diagnostic log is `EldenRingLorePickup.log` in Elden Ring's working directory.
 
-The log is written as `EldenRingLorePickup.log` in Elden Ring's working directory.
+Use offline or with ModEngine3's normal official-online protection. Native gameplay mods should not
+be used on official matchmaking servers.
 
-Use offline / with ModEngine3's normal official-online protection. Native gameplay mods should not be used on official matchmaking servers.
+## Building
+
+Requirements:
+
+- Windows 10/11
+- Rust stable with `x86_64-pc-windows-msvc`
+- Visual Studio 2022 Build Tools / MSVC
+
+Build with:
+
+    cargo build --release --target x86_64-pc-windows-msvc
+
+GitHub Actions also builds and packages the DLL on every push.
 
 ## Technical notes
 
-Pickup data comes from the game's dedicated large item-panel function. Its input structure contains
-the raw item ID, quantity and gem ID, so the mod observes the same decision the game has already
-made instead of reconstructing it from inventory state or screen pixels. The item ID encodes its
-category in the high nibble. LorePickup calls the game's own SearchStringTable against the live
-MsgRepository and chooses the appropriate FMG categories:
+The item presentation hook supplies a raw item ID and quantity, but that signal alone is too broad:
+the same path can be reached for routine pickups. LorePickup therefore stages the item for 1.5
+seconds and promotes it only while `CSFeManImp` reports `CSFeManHudState::PopupMenu` (`2`). Normal
+gameplay and small pickup logs remain in `Default` (`3`).
+
+The item ID encodes its category in the high nibble. LorePickup queries the game's live
+`MsgRepository`/`SearchStringTable` using these FMG categories:
 
 - Goods: name 10, info 20, caption 24
 - Weapons: name 11, info 21, caption 25
@@ -132,6 +125,5 @@ MsgRepository and chooses the appropriate FMG categories:
 - Talismans: name 13, info 23, caption 27
 - Ashes of War / gems: name 35, info 36, caption 37
 
-DLC1 and DLC2 category fallbacks are included as well.
-
-See THIRD_PARTY_NOTICES.md for the reverse-engineering references used to make the alpha.
+DLC1 and DLC2 fallbacks are included. See `THIRD_PARTY_NOTICES.md` for the public
+reverse-engineering references used by the project.

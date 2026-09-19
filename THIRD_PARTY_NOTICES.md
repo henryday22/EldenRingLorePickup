@@ -6,9 +6,9 @@ This alpha relies on public reverse-engineering work from the Elden Ring modding
 
 Repository: https://github.com/The-Grand-Archives/Elden-Ring-CT-TGA
 
-The public `ItemPopup_code.cea` script was used as the reverse-engineering reference for the
-large item-panel function signature, its `0x14` entry offset and the panel entry's item ID,
-quantity and gem fields. No Cheat Engine script or binary code is included in LorePickup.
+The public `ItemPopup_code.cea` script was used as the reverse-engineering reference for the item
+presentation function signature, its `0x14` entry offset and the entry's item ID, quantity and gem
+fields. No Cheat Engine script or binary code is included in LorePickup.
 
 ## from-software-archipelago-clients
 
@@ -36,11 +36,13 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE.
 
-## hudhook
+## fromsoftware-rs
 
-Repository: https://github.com/veeenu/hudhook
+Repository: https://github.com/vswarte/fromsoftware-rs
 
-Used as the DirectX 12 / Dear ImGui hook layer. See that project's license for its terms.
+The public Elden Ring frontend-manager definitions were used as the reference for
+`CSFeManImp::hud_state` at offset `0x78` and the `CSFeManHudState` values: `PopupMenu` (`2`) and
+`Default` (`3`). No source or binary code from that project is included in LorePickup.
 
 ## FMG category mapping
 
@@ -52,8 +54,10 @@ Repositories: https://github.com/vawser/Smithbox and
 https://github.com/Nordgaren/Elden-Ring-Debug-Tool
 
 Their public parameter definitions and runtime pointer patterns were used to identify the five
-`iconId` fields read by LorePickup. Smithbox is MIT licensed. Erd-Tools is GPL-3.0 licensed and was
-used as a reverse-engineering reference; no Erd-Tools source or binary code is included.
+`iconId` fields read by LorePickup. Erd-Tools' public CSFeMan signature was also used to resolve the
+frontend-manager singleton without relying solely on a fixed RVA. Smithbox is MIT licensed.
+Erd-Tools is GPL-3.0 licensed and was used only as a reverse-engineering reference; no Erd-Tools
+source or binary code is included.
 
 The source repository contains only numeric item-to-icon fallback mappings. Game artwork is not
 committed to this source tree.
