@@ -8,13 +8,12 @@ use std::ffi::c_void;
 use std::thread;
 use std::time::Duration;
 
-use hudhook::{hooks, Hudhook};
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
 #[no_mangle]
 pub unsafe extern "system" fn DllMain(
-    hmodule: HINSTANCE,
+    _hmodule: HINSTANCE,
     reason: u32,
     _reserved: *mut c_void,
 ) -> bool {
@@ -22,10 +21,9 @@ pub unsafe extern "system" fn DllMain(
         return true;
     }
 
-    let hmodule_raw = hmodule.0 as usize;
-
     thread::spawn(move || {
         runtime::init_log();
+        runtime::log_line("LorePickup v0.2 bootstrap: no DirectX overlay hooks.");
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
             Ok(found) => Some(found),
@@ -47,27 +45,23 @@ pub unsafe extern "system" fn DllMain(
             return;
         }
 
+        if let Err(err) = overlay::start() {
+            runtime::log_line(&format!("LorePickup: Win32 overlay failed to start: {err}"));
+        } else {
+            runtime::log_line("LorePickup: Win32 overlay thread started.");
+        }
+
+        // Avoid touching AddItem while Elden Ring, ERSS and the rest of the native stack are
+        // still initialising. Missing startup grants is harmless; world pickups happen later.
+        runtime::log_line("LorePickup: waiting 8 seconds before installing item hook.");
+        thread::sleep(Duration::from_secs(8));
+
         if let Err(err) = pickup::install() {
             runtime::log_line(&format!("LorePickup: item hook not installed: {err}"));
             return;
         }
 
-        runtime::log_line("LorePickup: item hook installed.");
-
-        let hmodule = HINSTANCE(hmodule_raw as _);
-        if let Err(err) = Hudhook::builder()
-            .with::<hooks::dx12::ImguiDx12Hooks>(overlay::LoreOverlay::new())
-            .with_hmodule(hmodule)
-            .build()
-            .apply()
-        {
-            runtime::log_line(&format!(
-                "LorePickup: DX12 overlay hook failed ({err:?}). Pickup hook remains active but nothing will be drawn."
-            ));
-            return;
-        }
-
-        runtime::log_line("LorePickup: DX12 overlay installed.");
+        runtime::log_line("LorePickup: item hook installed; ready for pickups.");
     });
 
     true
