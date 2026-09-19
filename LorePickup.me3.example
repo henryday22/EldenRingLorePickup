@@ -1,0 +1,5 @@
+# Example only.
+# Add the native block below to an existing Elden Ring profile rather than replacing your profile.
+
+[[natives]]
+path = 'natives/EldenRingLorePickup.dll'
