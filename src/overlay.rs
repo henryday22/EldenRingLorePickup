@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect,
-    GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, SelectObject, SetBkMode,
-    SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW,
+    Ellipse, EndPaint, FillRect, GetDC, GetStockObject, InvalidateRect, LineTo, MoveToEx,
+    Rectangle, ReleaseDC, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
     DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, FF_ROMAN, FW_NORMAL, FW_SEMIBOLD, HDC,
     OUT_TT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
@@ -22,7 +23,6 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClientRect,
     GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, RegisterClassW,
@@ -32,13 +32,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const MIN_DISPLAY_TIME: Duration = Duration::from_secs(14);
-const MAX_DISPLAY_TIME: Duration = Duration::from_secs(24);
-const QUEUED_DISPLAY_TIME: Duration = Duration::from_secs(12);
-const FADE_IN: Duration = Duration::from_millis(240);
-const FADE_OUT: Duration = Duration::from_millis(1150);
-const VK_F8_KEY: i32 = 0x77;
-const PANEL_ALPHA: u8 = 176;
+const CANDIDATE_LIFETIME: Duration = Duration::from_secs(6);
+const DIALOG_CLOSE_GRACE: Duration = Duration::from_millis(220);
+const PROBE_INTERVAL: Duration = Duration::from_millis(50);
+const FADE_IN: Duration = Duration::from_millis(180);
+const FADE_OUT: Duration = Duration::from_millis(360);
+const PANEL_ALPHA: u8 = 206;
 const CONTENT_ALPHA: u8 = 255;
 // Black is transparent outside the card. The icon has its own dark (not black) tile, which
 // preserves true black artwork while giving antialiased text a clean dark fringe.
@@ -89,8 +88,15 @@ pub struct LoreEntry {
 }
 
 struct DisplayState {
-    current: Option<(LoreEntry, Instant, Duration)>,
-    pending: VecDeque<LoreEntry>,
+    current: Option<CurrentEntry>,
+    pending: VecDeque<(LoreEntry, Instant)>,
+    last_dialog_seen: Option<Instant>,
+}
+
+struct CurrentEntry {
+    entry: LoreEntry,
+    shown_at: Instant,
+    closing_at: Option<Instant>,
 }
 
 impl DisplayState {
@@ -98,49 +104,69 @@ impl DisplayState {
         Self {
             current: None,
             pending: VecDeque::new(),
+            last_dialog_seen: None,
         }
     }
 
-    fn advance(&mut self, now: Instant) {
-        let expired = self
-            .current
-            .as_ref()
-            .map(|(_, shown_at, duration)| now.duration_since(*shown_at) >= *duration)
-            .unwrap_or(true);
-
-        if expired {
-            self.current = self.pending.pop_front().map(|entry| {
-                let duration = if self.pending.is_empty() {
-                    display_time(&entry.description)
-                } else {
-                    QUEUED_DISPLAY_TIME
-                };
-                (entry, now, duration)
-            });
-        }
+    fn has_work(&self) -> bool {
+        self.current.is_some() || !self.pending.is_empty()
     }
 
-    fn dismiss(&mut self, now: Instant) {
-        if let Some((_, shown_at, duration)) = self.current.as_mut() {
-            let fade_start = duration.saturating_sub(FADE_OUT);
-            let current_age = now.saturating_duration_since(*shown_at);
-            if current_age < fade_start {
-                *shown_at = now.checked_sub(fade_start).unwrap_or(now);
+    fn sync_dialog(&mut self, visible: bool, now: Instant) {
+        while self
+            .pending
+            .front()
+            .map(|(_, queued_at)| now.saturating_duration_since(*queued_at) > CANDIDATE_LIFETIME)
+            .unwrap_or(false)
+        {
+            self.pending.pop_front();
+        }
+
+        if visible {
+            self.last_dialog_seen = Some(now);
+            if let Some(current) = self.current.as_mut() {
+                current.closing_at = None;
+            } else if let Some((entry, _)) = self.pending.pop_back() {
+                // The most recent AddItem call is the one whose vanilla dialog has just appeared.
+                // Older candidates are commonly currencies or repeat pickups from the same lot.
+                self.pending.clear();
+                self.current = Some(CurrentEntry {
+                    entry,
+                    shown_at: now,
+                    closing_at: None,
+                });
+            }
+            return;
+        }
+
+        if let Some(current) = self.current.as_mut() {
+            let grace_elapsed = self
+                .last_dialog_seen
+                .map(|seen| now.saturating_duration_since(seen) >= DIALOG_CLOSE_GRACE)
+                .unwrap_or(true);
+            if grace_elapsed && current.closing_at.is_none() {
+                current.closing_at = Some(now);
+            }
+            if current
+                .closing_at
+                .map(|closing| now.saturating_duration_since(closing) >= FADE_OUT)
+                .unwrap_or(false)
+            {
+                self.current = None;
+                self.last_dialog_seen = None;
             }
         }
     }
 
     fn snapshot(&self, now: Instant) -> Option<DisplaySnapshot> {
-        self.current
-            .as_ref()
-            .map(|(entry, shown_at, duration)| DisplaySnapshot {
-                entry: entry.clone(),
-                shown_at: *shown_at,
-                age: now.saturating_duration_since(*shown_at),
-                duration: *duration,
-                pending: self.pending.iter().take(3).cloned().collect(),
-                queued: self.pending.len(),
-            })
+        self.current.as_ref().map(|current| DisplaySnapshot {
+            entry: current.entry.clone(),
+            shown_at: current.shown_at,
+            age: now.saturating_duration_since(current.shown_at),
+            closing_age: current
+                .closing_at
+                .map(|closing| now.saturating_duration_since(closing)),
+        })
     }
 }
 
@@ -149,9 +175,7 @@ struct DisplaySnapshot {
     entry: LoreEntry,
     shown_at: Instant,
     age: Duration,
-    duration: Duration,
-    pending: Vec<LoreEntry>,
-    queued: usize,
+    closing_age: Option<Duration>,
 }
 
 static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
@@ -165,13 +189,7 @@ pub fn enqueue(entry: LoreEntry) {
             "LorePickup: queued {} ({:#x}, param {}, qty {}).",
             entry.name, entry.raw_id, entry.param_id, entry.quantity
         ));
-        state.pending.push_back(entry);
-        if state.current.is_none() {
-            state.advance(Instant::now());
-        } else if let Some((_, shown_at, duration)) = state.current.as_mut() {
-            let elapsed = Instant::now().saturating_duration_since(*shown_at);
-            *duration = (*duration).min(elapsed + QUEUED_DISPLAY_TIME);
-        }
+        state.pending.push_back((entry, Instant::now()));
     }
 
     let background = BACKGROUND_HWND.load(Ordering::Relaxed) as HWND;
@@ -273,7 +291,10 @@ fn overlay_thread() -> Result<(), String> {
         let mut shown = false;
         let mut painted_entry: Option<Instant> = None;
         let mut applied_alpha = 0u8;
-        let mut dismiss_down = false;
+        let mut last_probe = Instant::now()
+            .checked_sub(PROBE_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut dialog_hits = 0u8;
 
         loop {
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -282,16 +303,32 @@ fn overlay_thread() -> Result<(), String> {
             }
 
             let now = Instant::now();
-            let key_down = GetAsyncKeyState(VK_F8_KEY) < 0;
+            let has_work = DISPLAY
+                .get_or_init(|| Mutex::new(DisplayState::new()))
+                .lock()
+                .map(|state| state.has_work())
+                .unwrap_or(false);
+
+            if has_work && now.saturating_duration_since(last_probe) >= PROBE_INTERVAL {
+                last_probe = now;
+                let detected = find_game_window(background, content)
+                    .filter(|game| GetForegroundWindow() == *game)
+                    .map(|game| detect_vanilla_pickup_dialog(game))
+                    .unwrap_or(false);
+                dialog_hits = if detected {
+                    dialog_hits.saturating_add(1).min(3)
+                } else {
+                    0
+                };
+            } else if !has_work {
+                dialog_hits = 0;
+            }
+
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
-                if key_down && !dismiss_down && shown {
-                    state.dismiss(now);
-                }
-                dismiss_down = key_down;
-                state.advance(now);
+                state.sync_dialog(dialog_hits >= 2, now);
                 state.snapshot(now)
             } else {
                 None
@@ -301,7 +338,7 @@ fn overlay_thread() -> Result<(), String> {
                 let alignment_changed =
                     update_alignment(background, content, &mut placement, &mut shown)
                         .unwrap_or(false);
-                let fade = overlay_fade(snapshot.age);
+                let fade = overlay_fade(&snapshot);
                 let foreground_alpha = (CONTENT_ALPHA as f32 * fade).round() as u8;
                 if foreground_alpha != applied_alpha {
                     let panel_alpha = (PANEL_ALPHA as f32 * fade).round() as u8;
@@ -323,8 +360,8 @@ fn overlay_thread() -> Result<(), String> {
                 // The pixels do not change during the hold. Repainting the full-screen layered
                 // window every 16 ms caused GDI to expose its transparent clear between drawing
                 // passes, which looked like the game was flickering through the card.
-                let dissolving = dissolve_progress(snapshot.age, snapshot.duration) > 0.0;
-                if painted_entry != Some(snapshot.shown_at) || alignment_changed || dissolving {
+                let closing = snapshot.closing_age.is_some();
+                if painted_entry != Some(snapshot.shown_at) || alignment_changed || closing {
                     InvalidateRect(background, null(), 0);
                     InvalidateRect(content, null(), 0);
                     painted_entry = Some(snapshot.shown_at);
@@ -341,29 +378,26 @@ fn overlay_thread() -> Result<(), String> {
     }
 }
 
-fn display_time(description: &str) -> Duration {
-    // About 180 words/minute after allowing for the title and the interruption of play.
-    let words = description.split_whitespace().count() as u64;
-    let seconds = 20 + words.saturating_sub(45).div_ceil(3);
-    Duration::from_secs(seconds.clamp(MIN_DISPLAY_TIME.as_secs(), MAX_DISPLAY_TIME.as_secs()))
-}
-
-fn overlay_fade(age: Duration) -> f32 {
-    if age < FADE_IN {
-        age.as_secs_f32() / FADE_IN.as_secs_f32()
+fn overlay_fade(snapshot: &DisplaySnapshot) -> f32 {
+    let opening = if snapshot.age < FADE_IN {
+        snapshot.age.as_secs_f32() / FADE_IN.as_secs_f32()
     } else {
         1.0
-    }
-    .clamp(0.0, 1.0)
+    };
+    let closing = if let Some(age) = snapshot.closing_age {
+        1.0 - age.as_secs_f32() / FADE_OUT.as_secs_f32()
+    } else {
+        1.0
+    };
+    opening.min(closing).clamp(0.0, 1.0)
 }
 
-fn dissolve_progress(age: Duration, duration: Duration) -> f32 {
-    if duration.saturating_sub(age) < FADE_OUT {
-        1.0 - duration.saturating_sub(age).as_secs_f32() / FADE_OUT.as_secs_f32()
-    } else {
-        0.0
-    }
-    .clamp(0.0, 1.0)
+fn close_progress(snapshot: &DisplaySnapshot) -> f32 {
+    snapshot
+        .closing_age
+        .map(|age| age.as_secs_f32() / FADE_OUT.as_secs_f32())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -513,6 +547,117 @@ unsafe fn find_game_window(background: HWND, content: HWND) -> Option<HWND> {
     }
 }
 
+/// Elden Ring owns the pickup lifecycle. We only activate a staged lore card while the
+/// distinctive bottom-centre `NEW item / OK` panel is actually present on the composited game
+/// image. That means the game's persistent per-character acquisition flags—not a mod-side list—
+/// decide whether an item is new, and the same controller/keyboard confirmation closes both.
+unsafe fn detect_vanilla_pickup_dialog(game: HWND) -> bool {
+    let mut client: RECT = std::mem::zeroed();
+    if GetClientRect(game, &mut client) == 0 {
+        return false;
+    }
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    if width < 640 || height < 360 {
+        return false;
+    }
+
+    let mut origin = POINT { x: 0, y: 0 };
+    if ClientToScreen(game, &mut origin) == 0 {
+        return false;
+    }
+
+    // The confirmation strip is centred at the foot of the vanilla acquisition dialog.
+    // Relative coordinates follow Elden Ring's safe-area layout and survive aspect-ratio changes.
+    let capture_left = (width as f32 * 0.39).round() as i32;
+    let capture_top = (height as f32 * 0.79).round() as i32;
+    let capture_width = (width as f32 * 0.22).round() as i32;
+    let capture_height = (height as f32 * 0.11).round() as i32;
+
+    let screen_dc = GetDC(null_mut());
+    if screen_dc.is_null() {
+        return false;
+    }
+    let memory_dc = CreateCompatibleDC(screen_dc);
+    if memory_dc.is_null() {
+        ReleaseDC(null_mut(), screen_dc);
+        return false;
+    }
+
+    let mut bits: *mut std::ffi::c_void = null_mut();
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: capture_width,
+            // Negative height creates a top-down BGRA buffer.
+            biHeight: -capture_height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..std::mem::zeroed()
+        },
+        ..std::mem::zeroed()
+    };
+    let bitmap = CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    if bitmap.is_null() || bits.is_null() {
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(memory_dc);
+        ReleaseDC(null_mut(), screen_dc);
+        return false;
+    }
+
+    let previous = SelectObject(memory_dc, bitmap);
+    let copied = BitBlt(
+        memory_dc,
+        0,
+        0,
+        capture_width,
+        capture_height,
+        screen_dc,
+        origin.x + capture_left,
+        origin.y + capture_top,
+        SRCCOPY,
+    ) != 0;
+
+    let mut samples = 0usize;
+    let mut dark = 0usize;
+    let mut pale = 0usize;
+    let mut warm = 0usize;
+    if copied {
+        let pixels = std::slice::from_raw_parts(
+            bits as *const u32,
+            (capture_width * capture_height) as usize,
+        );
+        for y in (0..capture_height as usize).step_by(2) {
+            for x in (0..capture_width as usize).step_by(2) {
+                let pixel = pixels[y * capture_width as usize + x];
+                let b = (pixel & 0xFF) as i32;
+                let g = ((pixel >> 8) & 0xFF) as i32;
+                let r = ((pixel >> 16) & 0xFF) as i32;
+                let highest = r.max(g).max(b);
+                let lowest = r.min(g).min(b);
+                samples += 1;
+                dark += usize::from(highest < 58);
+                pale += usize::from(lowest > 112 && highest - lowest < 56);
+                warm += usize::from(r > 105 && g > 68 && b < 118 && r * 10 > b * 12);
+            }
+        }
+    }
+
+    SelectObject(memory_dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory_dc);
+    ReleaseDC(null_mut(), screen_dc);
+
+    copied
+        && samples > 0
+        && dark * 100 > samples * 18
+        && pale * 1000 > samples * 4
+        && warm * 1000 > samples
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -609,8 +754,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     let scale = (height as f32 / 2160.0).clamp(0.58, 1.35);
     let px = |at_4k: f32| (at_4k * scale).round() as i32;
 
-    let panel_width = ((width as f32 * 0.235).round() as i32)
-        .clamp(px(720.0), px(1040.0))
+    let panel_width = ((width as f32 * 0.215).round() as i32)
+        .clamp(px(650.0), px(920.0))
+        .min((height as f32 * 0.46).round() as i32)
         .min(width - px(100.0));
     let margin_right = px(66.0);
     let pad_x = px(62.0);
@@ -716,8 +862,6 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
                 .map(|line| measure_text(hdc, line, text_width) + detail_gap)
                 .sum::<i32>()
     };
-    let footer_height = px(42.0);
-
     let natural_height = pad_top
         + title_height
         + title_gap
@@ -725,9 +869,10 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         + rule_gap
         + body_height
         + details_height
-        + footer_height
         + pad_bottom;
-    let panel_height = natural_height.max((panel_width as f32 * 1.34) as i32);
+    let panel_height = natural_height
+        .max((panel_width as f32 * 1.50) as i32)
+        .min(height - px(90.0));
     let right = width - margin_right;
     // Elden Ring's pickup strip sits at the lower-right. End the lore card just above it.
     let bottom_anchor = (height as f32 * 0.755).round() as i32;
@@ -741,37 +886,17 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         bottom,
     };
 
-    let dissolve = dissolve_progress(snapshot.age, snapshot.duration);
-    let deck_count = snapshot.pending.len();
-
-    // Pending cards sit visibly behind the current one, like an ornate deck.
-    for depth in (1..=deck_count).rev() {
-        let offset_x = px(15.0) * depth as i32;
-        let offset_y = px(22.0) * depth as i32;
-        let rear = RECT {
-            left: panel.left - offset_x,
-            right: panel.right - offset_x,
-            top: panel.top - offset_y,
-            bottom: panel.bottom - offset_y,
-        };
-        if layer == PaintLayer::Background {
-            let brush = CreateSolidBrush(rgb(16, 15, 12));
-            FillRect(hdc, &rear, brush);
-            DeleteObject(brush);
-        } else {
-            draw_gilded_frame(hdc, &rear, px);
-        }
-    }
-
     if layer == PaintLayer::Background {
-        // Only this window is alpha-reduced. The separate content window remains fully opaque.
-        let panel_brush = CreateSolidBrush(rgb(19, 17, 14));
-        if dissolve <= 0.0 {
+        // The painted vellum lives on the translucent layer; icons and lettering remain on the
+        // fully opaque content layer. The supplied art has genuinely ragged transparent edges.
+        let drawn = crate::icons::card_path()
+            .map(|path| draw_png_exact(hdc, &panel, &path))
+            .unwrap_or(false);
+        if !drawn {
+            let panel_brush = CreateSolidBrush(rgb(28, 24, 18));
             FillRect(hdc, &panel, panel_brush);
-        } else {
-            draw_dissolving_panel(hdc, &panel, panel_brush, dissolve, entry.raw_id, px);
+            DeleteObject(panel_brush);
         }
-        DeleteObject(panel_brush);
 
         SelectObject(hdc, old_font);
         if !title_font.is_null() {
@@ -786,10 +911,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         return;
     }
 
-    let ink = (1.0 - dissolve).clamp(0.0, 1.0);
-    if ink > 0.05 {
-        draw_gilded_frame_tinted(hdc, &panel, px, ink);
-    }
+    let ink = 1.0;
 
     let text_left = left + pad_x;
     let text_right = right - pad_x;
@@ -885,25 +1007,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         }
     }
 
-    SelectObject(hdc, selected_detail);
-    let footer = if snapshot.queued > 0 {
-        format!("F8  NEXT     {} IN DECK", snapshot.queued)
-    } else {
-        "F8  DISMISS".to_string()
-    };
-    draw_shadowed_text(
-        hdc,
-        &footer,
-        text_left,
-        panel.bottom - pad_bottom,
-        text_right,
-        panel.bottom - px(20.0),
-        fade_colour(164, 137, 82, ink),
-        1,
-    );
-
-    if dissolve > 0.0 {
-        draw_rune_dust(hdc, &panel, dissolve, entry.raw_id, px);
+    let closing = close_progress(snapshot);
+    if closing > 0.0 {
+        draw_rune_dust(hdc, &panel, closing, entry.raw_id, px);
     }
 
     SelectObject(hdc, old_font);
@@ -915,124 +1021,6 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     }
     if !detail_font.is_null() {
         DeleteObject(detail_font);
-    }
-}
-
-unsafe fn draw_gilded_frame(hdc: HDC, panel: &RECT, px: impl Fn(f32) -> i32 + Copy) {
-    let outer = CreatePen(PS_SOLID, px(3.0).max(1), rgb(139, 108, 57));
-    let old_pen = SelectObject(hdc, outer);
-    let old_brush = SelectObject(hdc, GetStockObject(5)); // NULL_BRUSH
-    Rectangle(hdc, panel.left, panel.top, panel.right, panel.bottom);
-
-    let inset = px(9.0).max(4);
-    let inner = CreatePen(PS_SOLID, px(1.0).max(1), rgb(201, 170, 102));
-    SelectObject(hdc, inner);
-    Rectangle(
-        hdc,
-        panel.left + inset,
-        panel.top + inset,
-        panel.right - inset,
-        panel.bottom - inset,
-    );
-
-    // Bright corner brackets, short enough to feel like the game's restrained filigree.
-    let corner = px(62.0).max(28);
-    let bright = CreatePen(PS_SOLID, px(3.0).max(1), rgb(221, 190, 116));
-    SelectObject(hdc, bright);
-    for &(x, y, dx, dy) in &[
-        (panel.left, panel.top, 1, 1),
-        (panel.right, panel.top, -1, 1),
-        (panel.left, panel.bottom, 1, -1),
-        (panel.right, panel.bottom, -1, -1),
-    ] {
-        MoveToEx(hdc, x, y + dy * corner, null_mut());
-        LineTo(hdc, x, y);
-        LineTo(hdc, x + dx * corner, y);
-    }
-
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    DeleteObject(outer);
-    DeleteObject(inner);
-    DeleteObject(bright);
-}
-
-unsafe fn draw_gilded_frame_tinted(
-    hdc: HDC,
-    panel: &RECT,
-    px: impl Fn(f32) -> i32 + Copy,
-    opacity: f32,
-) {
-    let gold = |r: u8, g: u8, b: u8| fade_colour(r, g, b, opacity);
-    let outer = CreatePen(PS_SOLID, px(3.0).max(1), gold(139, 108, 57));
-    let old_pen = SelectObject(hdc, outer);
-    let old_brush = SelectObject(hdc, GetStockObject(5));
-    Rectangle(hdc, panel.left, panel.top, panel.right, panel.bottom);
-
-    let inset = px(9.0).max(4);
-    let inner = CreatePen(PS_SOLID, px(1.0).max(1), gold(201, 170, 102));
-    SelectObject(hdc, inner);
-    Rectangle(
-        hdc,
-        panel.left + inset,
-        panel.top + inset,
-        panel.right - inset,
-        panel.bottom - inset,
-    );
-
-    let corner = px(62.0).max(28);
-    let bright = CreatePen(PS_SOLID, px(3.0).max(1), gold(221, 190, 116));
-    SelectObject(hdc, bright);
-    for &(x, y, dx, dy) in &[
-        (panel.left, panel.top, 1, 1),
-        (panel.right, panel.top, -1, 1),
-        (panel.left, panel.bottom, 1, -1),
-        (panel.right, panel.bottom, -1, -1),
-    ] {
-        MoveToEx(hdc, x, y + dy * corner, null_mut());
-        LineTo(hdc, x, y);
-        LineTo(hdc, x + dx * corner, y);
-    }
-
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    DeleteObject(outer);
-    DeleteObject(inner);
-    DeleteObject(bright);
-}
-
-unsafe fn draw_dissolving_panel(
-    hdc: HDC,
-    panel: &RECT,
-    brush: *mut std::ffi::c_void,
-    progress: f32,
-    seed: u32,
-    px: impl Fn(f32) -> i32 + Copy,
-) {
-    let tile = px(22.0).max(8);
-    let mut y = panel.top;
-    let mut row = 0u32;
-    while y < panel.bottom {
-        let mut x = panel.left;
-        let mut column = 0u32;
-        while x < panel.right {
-            let noise = hash_unit(seed ^ row.wrapping_mul(0x9E37) ^ column.wrapping_mul(0x85EB));
-            let right_bias =
-                ((x - panel.left) as f32 / (panel.right - panel.left).max(1) as f32) * 0.22;
-            if noise * 0.78 + right_bias > progress {
-                let tile_rect = RECT {
-                    left: x,
-                    top: y,
-                    right: (x + tile + 1).min(panel.right),
-                    bottom: (y + tile + 1).min(panel.bottom),
-                };
-                FillRect(hdc, &tile_rect, brush);
-            }
-            x += tile;
-            column += 1;
-        }
-        y += tile;
-        row += 1;
     }
 }
 
@@ -1139,6 +1127,17 @@ unsafe fn draw_icon_panel(
 }
 
 unsafe fn draw_png(hdc: HDC, rect: &RECT, path: &std::path::Path) -> bool {
+    let inset = ((rect.right - rect.left) / 18).max(3);
+    let target = RECT {
+        left: rect.left + inset,
+        top: rect.top + inset,
+        right: rect.right - inset,
+        bottom: rect.bottom - inset,
+    };
+    draw_png_exact(hdc, &target, path)
+}
+
+unsafe fn draw_png_exact(hdc: HDC, rect: &RECT, path: &std::path::Path) -> bool {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -1152,14 +1151,13 @@ unsafe fn draw_png(hdc: HDC, rect: &RECT, path: &std::path::Path) -> bool {
     let mut graphics = null_mut();
     let ok = if GdipCreateFromHDC(hdc, &mut graphics) == 0 && !graphics.is_null() {
         GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
-        let inset = ((rect.right - rect.left) / 18).max(3);
         let status = GdipDrawImageRectI(
             graphics,
             image,
-            rect.left + inset,
-            rect.top + inset,
-            rect.right - rect.left - inset * 2,
-            rect.bottom - rect.top - inset * 2,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
         );
         GdipDeleteGraphics(graphics);
         status == 0

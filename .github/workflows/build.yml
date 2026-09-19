@@ -29,6 +29,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/EldenRingLorePickup.dll dist/EldenRingLorePickup.dll
+          Copy-Item assets/EldenRingLorePickup-card.png dist/EldenRingLorePickup-card.png
           Copy-Item README.md dist/README.md
           Copy-Item LorePickup.me3.example dist/LorePickup.me3.example
           Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
@@ -50,31 +51,31 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.5.0.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.5.0
-          path: EldenRingLorePickup-v0.5.0.zip
+          name: EldenRingLorePickup-v0.6.0
+          path: EldenRingLorePickup-v0.6.0.zip
 
-      - name: Publish v0.5.0 release
+      - name: Publish v0.6.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.5.0
+          tag_name: v0.6.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.5.0 — Stacked Lore Deck
+          name: LorePickup v0.6.0 — Vanilla-Synchronised Lore Cards
           body: |
-            Reworks the overlay into a narrower, taller ornate card with consistent paragraph spacing. Multiple pickups now appear as a visible deck, F8 dismisses the front card, and outgoing cards dissolve into gold rune-like dust.
+            Lore cards now follow Elden Ring's own bottom-centre `NEW item / OK` dialog. If the vanilla dialog is not present, the card does not appear; dismissing it with the game's normal keyboard/controller OK input dismisses the lore card as well. The mod no longer keeps a per-launch "seen" list or uses an independent timer/F8 queue.
 
-            Icon resolution now rejects invalid zero IDs and verifies the supplied PNG before falling back to the bundled mapping. Cards also show compact live-param details: weapon requirements, affinity, base attack and Ash of War; armour/talisman load guidance; and crafting outputs for ingredients.
+            The presentation is rebuilt around a supplied, hand-aged translucent vellum card with irregular worn edges and restrained gilding. Text and inventory icons remain fully opaque. The old square-tile dissolve has been replaced with a brief smooth fade and fine gold dust.
 
-            The double-buffered, split-translucency renderer remains in place to prevent the game from flickering through the card. No DirectX hook is used.
+            The full icon bundle is included. Cards retain live weapon requirements, affinity, base attack and Ash of War, armour/talisman guidance and ingredient recipe outputs. Whetblades now explain exactly which affinities they unlock and which stats those affinities favour, including Poison/Blood/Occult guidance for the Black Whetblade.
 
-            Extract the DLL and the complete `EldenRingLorePickup-icons` folder into the same ModEngine3 `natives` directory. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup.dll`.
-          files: EldenRingLorePickup-v0.5.0.zip
+            Extract the DLL, `EldenRingLorePickup-card.png`, and the complete `EldenRingLorePickup-icons` folder into the same ModEngine3 `natives` directory. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup.dll`.
+          files: EldenRingLorePickup-v0.6.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

@@ -285,12 +285,47 @@ fn goods_details(param_id: u32) -> Vec<String> {
         return vec!["TYPE  Item".to_string()];
     };
     let goods_type = unsafe { read_u8(row + 0x3E) }.unwrap_or(0);
+    if let Some(lines) = whetblade_guidance(param_id) {
+        return lines;
+    }
+
     let mut lines = vec![format!("TYPE  {}", goods_type_label(goods_type))];
     let recipes = crafting_outputs(param_id);
     if !recipes.is_empty() {
-        lines.push(format!("CRAFTS  {}", recipes.join(" · ")));
+        lines.push(format!("USED TO MAKE  {}", recipes.join(" · ")));
     }
     lines
+}
+
+fn whetblade_guidance(param_id: u32) -> Option<Vec<String>> {
+    let lines: &[&str] = match param_id {
+        8590 => &[
+            "USE  Apply Ashes of War to compatible armaments at a Site of Grace",
+            "UNLOCKS  Standard affinity choices supplied by the selected skill",
+        ],
+        8970 => &[
+            "UNLOCKS  Heavy · Keen · Quality affinities",
+            "SCALING  Heavy favours STR; Keen favours DEX; Quality divides scaling between both",
+        ],
+        8971 => &[
+            "UNLOCKS  Fire · Flame Art affinities",
+            "SCALING  Fire favours STR; Flame Art adds fire damage that scales with FAI",
+        ],
+        8972 => &[
+            "UNLOCKS  Lightning · Sacred affinities",
+            "SCALING  Lightning favours DEX; Sacred adds holy damage that scales with FAI",
+        ],
+        8973 => &[
+            "UNLOCKS  Magic · Cold affinities",
+            "SCALING  Magic favours INT; Cold adds INT scaling and frost buildup",
+        ],
+        8974 => &[
+            "UNLOCKS  Poison · Blood · Occult affinities",
+            "SCALING  Poison/Blood add ARC scaling and status buildup; Occult shifts physical and innate-status scaling toward ARC",
+        ],
+        _ => return None,
+    };
+    Some(lines.iter().map(|line| (*line).to_string()).collect())
 }
 
 fn goods_type_label(goods_type: u8) -> &'static str {

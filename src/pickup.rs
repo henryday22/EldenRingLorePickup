@@ -1,6 +1,5 @@
-use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use retour::GenericDetour;
 
@@ -9,7 +8,6 @@ use crate::{overlay, runtime};
 type AddItemFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, u64) -> u64;
 
 static HOOK: OnceLock<GenericDetour<AddItemFn>> = OnceLock::new();
-static SEEN: OnceLock<Mutex<HashSet<(u32, u32)>>> = OnceLock::new();
 
 const ENTRY_ID_OFFSET: usize = 0x04;
 const ENTRY_QUANTITY_OFFSET: usize = 0x08;
@@ -44,7 +42,6 @@ pub fn install() -> Result<(), String> {
             .map_err(|e| format!("failed to enable AddItem detour: {e}"))?;
     }
 
-    let _ = SEEN.set(Mutex::new(HashSet::new()));
     Ok(())
 }
 
@@ -89,17 +86,6 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         category,
         0x0000_0000 | 0x1000_0000 | 0x2000_0000 | 0x4000_0000 | 0x8000_0000
     ) {
-        return;
-    }
-
-    let key = (category, param_id);
-    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
-
-    if let Ok(mut guard) = seen.lock() {
-        if !guard.insert(key) {
-            return;
-        }
-    } else {
         return;
     }
 
