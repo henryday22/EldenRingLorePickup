@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect,
-    GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, SelectObject, SetBkMode,
-    SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW,
+    Ellipse, EndPaint, FillRect, GetDC, GetStockObject, InvalidateRect, LineTo, MoveToEx,
+    Rectangle, ReleaseDC, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
     DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, FF_ROMAN, FW_NORMAL, FW_SEMIBOLD, HDC,
     OUT_TT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
@@ -38,6 +39,8 @@ const FADE_IN: Duration = Duration::from_millis(180);
 const FADE_OUT: Duration = Duration::from_millis(360);
 const MAX_CARD_LIFETIME: Duration = Duration::from_secs(30);
 const DISMISS_ARM_DELAY: Duration = Duration::from_millis(180);
+const CANDIDATE_LIFETIME: Duration = Duration::from_secs(5);
+const DIALOG_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 const PANEL_ALPHA: u8 = 224;
 const CONTENT_ALPHA: u8 = 255;
 // Black is transparent outside the card. The icon has its own dark (not black) tile, which
@@ -91,7 +94,14 @@ pub struct LoreEntry {
 struct DisplayState {
     current: Option<CurrentEntry>,
     pending: VecDeque<LoreEntry>,
+    candidates: VecDeque<CandidateEntry>,
     last_y_down: bool,
+}
+
+struct CandidateEntry {
+    entry: LoreEntry,
+    staged_at: Instant,
+    likely_new: bool,
 }
 
 struct CurrentEntry {
@@ -106,11 +116,28 @@ impl DisplayState {
         Self {
             current: None,
             pending: VecDeque::new(),
+            candidates: VecDeque::new(),
             last_y_down: false,
         }
     }
 
     fn tick(&mut self, y_down: bool, now: Instant) {
+        while self
+            .candidates
+            .front()
+            .map(|candidate| {
+                now.saturating_duration_since(candidate.staged_at) > CANDIDATE_LIFETIME
+            })
+            .unwrap_or(false)
+        {
+            if let Some(expired) = self.candidates.pop_front() {
+                crate::runtime::log_line(&format!(
+                    "LorePickup: expired unconfirmed candidate {} ({:#x}).",
+                    expired.entry.name, expired.entry.raw_id
+                ));
+            }
+        }
+
         if self.current.is_none() {
             self.advance(now);
         }
@@ -151,6 +178,37 @@ impl DisplayState {
         }
     }
 
+    fn confirm_new_dialog(&mut self, now: Instant) {
+        if self.candidates.is_empty() {
+            return;
+        }
+
+        let mut candidates = self.candidates.drain(..).collect::<Vec<_>>();
+        let has_likely = candidates.iter().any(|candidate| candidate.likely_new);
+        if has_likely {
+            candidates.retain(|candidate| candidate.likely_new);
+        } else {
+            // If the inventory structure could not be resolved, the game's own NEW dialog is
+            // still authoritative. Its most recent AddItem call is the displayed item.
+            candidates = candidates.into_iter().rev().take(1).collect();
+        }
+
+        for candidate in candidates {
+            crate::runtime::log_line(&format!(
+                "LorePickup: NEW dialog confirmed {}; promoting card ({:#x}).",
+                candidate.entry.name, candidate.entry.raw_id
+            ));
+            self.pending.push_back(candidate.entry);
+        }
+        if self.current.is_none() {
+            self.advance(now);
+        }
+    }
+
+    fn has_candidates(&self) -> bool {
+        !self.candidates.is_empty()
+    }
+
     fn snapshot(&self, now: Instant) -> Option<DisplaySnapshot> {
         self.current.as_ref().map(|current| DisplaySnapshot {
             entry: current.entry.clone(),
@@ -177,14 +235,18 @@ static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
 static BACKGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 static CONTENT_HWND: AtomicIsize = AtomicIsize::new(0);
 
-pub fn enqueue(entry: LoreEntry) {
+pub fn stage(entry: LoreEntry, likely_new: bool) {
     let display = DISPLAY.get_or_init(|| Mutex::new(DisplayState::new()));
     if let Ok(mut state) = display.lock() {
         crate::runtime::log_line(&format!(
-            "LorePickup: queued {} ({:#x}, param {}, qty {}).",
-            entry.name, entry.raw_id, entry.param_id, entry.quantity
+            "LorePickup: staged {} ({:#x}, param {}, qty {}, likely_new={}).",
+            entry.name, entry.raw_id, entry.param_id, entry.quantity, likely_new
         ));
-        state.pending.push_back(entry);
+        state.candidates.push_back(CandidateEntry {
+            entry,
+            staged_at: Instant::now(),
+            likely_new,
+        });
     }
 
     let background = BACKGROUND_HWND.load(Ordering::Relaxed) as HWND;
@@ -286,6 +348,12 @@ fn overlay_thread() -> Result<(), String> {
         let mut shown = false;
         let mut painted_entry: Option<Instant> = None;
         let mut applied_alpha = 0u8;
+        let mut last_dialog_probe = Instant::now()
+            .checked_sub(DIALOG_PROBE_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut dialog_hits = 0u8;
+        let mut dialog_misses = 0u8;
+        let mut dialog_latched = false;
         loop {
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
@@ -295,10 +363,39 @@ fn overlay_thread() -> Result<(), String> {
             let now = Instant::now();
             let y_down = controller_y_down();
 
+            let has_candidates = DISPLAY
+                .get_or_init(|| Mutex::new(DisplayState::new()))
+                .lock()
+                .map(|state| state.has_candidates())
+                .unwrap_or(false);
+            if has_candidates
+                && now.saturating_duration_since(last_dialog_probe) >= DIALOG_PROBE_INTERVAL
+            {
+                last_dialog_probe = now;
+                let detected = find_game_window(background, content)
+                    .filter(|game| GetForegroundWindow() == *game)
+                    .map(|game| detect_new_item_dialog(game))
+                    .unwrap_or(false);
+                if detected {
+                    dialog_hits = dialog_hits.saturating_add(1).min(3);
+                    dialog_misses = 0;
+                } else {
+                    dialog_misses = dialog_misses.saturating_add(1).min(3);
+                    dialog_hits = 0;
+                }
+                if dialog_misses >= 2 {
+                    dialog_latched = false;
+                }
+            }
+
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
+                if dialog_hits >= 2 && !dialog_latched {
+                    state.confirm_new_dialog(now);
+                    dialog_latched = true;
+                }
                 state.tick(y_down, now);
                 state.snapshot(now)
             } else {
@@ -518,6 +615,152 @@ unsafe fn find_game_window(background: HWND, content: HWND) -> Option<HWND> {
     } else {
         Some(ctx.best)
     }
+}
+
+/// Confirms the large bottom-centre first-acquisition dialog by its layout, not by loose colour
+/// counts. The dialog has three long horizontal edges: the top of the item panel, the divider
+/// above the OK strip, and the bottom of that strip. Requiring all three rejects ordinary scenery
+/// and the small right-side pickup log while remaining stable across HDR colour changes.
+unsafe fn detect_new_item_dialog(game: HWND) -> bool {
+    let mut client: RECT = std::mem::zeroed();
+    if GetClientRect(game, &mut client) == 0 {
+        return false;
+    }
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    if width < 640 || height < 360 {
+        return false;
+    }
+
+    let mut origin = POINT { x: 0, y: 0 };
+    if ClientToScreen(game, &mut origin) == 0 {
+        return false;
+    }
+
+    let capture_left = (width as f32 * 0.35).round() as i32;
+    let capture_top = (height as f32 * 0.53).round() as i32;
+    let capture_width = (width as f32 * 0.30).round() as i32;
+    let capture_height = (height as f32 * 0.39).round() as i32;
+    if capture_width < 100 || capture_height < 80 {
+        return false;
+    }
+
+    let screen_dc = GetDC(null_mut());
+    if screen_dc.is_null() {
+        return false;
+    }
+    let memory_dc = CreateCompatibleDC(screen_dc);
+    if memory_dc.is_null() {
+        ReleaseDC(null_mut(), screen_dc);
+        return false;
+    }
+
+    let mut bits: *mut std::ffi::c_void = null_mut();
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: capture_width,
+            biHeight: -capture_height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..std::mem::zeroed()
+        },
+        ..std::mem::zeroed()
+    };
+    let bitmap = CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+    if bitmap.is_null() || bits.is_null() {
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(memory_dc);
+        ReleaseDC(null_mut(), screen_dc);
+        return false;
+    }
+
+    let previous = SelectObject(memory_dc, bitmap);
+    let copied = BitBlt(
+        memory_dc,
+        0,
+        0,
+        capture_width,
+        capture_height,
+        screen_dc,
+        origin.x + capture_left,
+        origin.y + capture_top,
+        SRCCOPY,
+    ) != 0;
+
+    let detected = if copied {
+        let pixels = std::slice::from_raw_parts(
+            bits as *const u32,
+            (capture_width * capture_height) as usize,
+        );
+        let top = strongest_horizontal_edge(
+            pixels,
+            capture_width as usize,
+            capture_height as usize,
+            0.02,
+            0.19,
+        );
+        let divider = strongest_horizontal_edge(
+            pixels,
+            capture_width as usize,
+            capture_height as usize,
+            0.63,
+            0.80,
+        );
+        let bottom = strongest_horizontal_edge(
+            pixels,
+            capture_width as usize,
+            capture_height as usize,
+            0.79,
+            0.96,
+        );
+        top > 0.52 && divider > 0.52 && bottom > 0.52
+    } else {
+        false
+    };
+
+    SelectObject(memory_dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory_dc);
+    ReleaseDC(null_mut(), screen_dc);
+    detected
+}
+
+fn strongest_horizontal_edge(
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    start: f32,
+    end: f32,
+) -> f32 {
+    let y_start = ((height as f32 * start).round() as usize).min(height.saturating_sub(2));
+    let y_end = ((height as f32 * end).round() as usize)
+        .max(y_start + 1)
+        .min(height.saturating_sub(1));
+    let x_start = (width as f32 * 0.03).round() as usize;
+    let x_end = (width as f32 * 0.97).round() as usize;
+    let sample_count = x_end.saturating_sub(x_start).max(1);
+    let mut strongest = 0.0f32;
+
+    for y in y_start..y_end {
+        let mut changed = 0usize;
+        for x in x_start..x_end {
+            let upper = pixels[y * width + x];
+            let lower = pixels[(y + 1) * width + x];
+            let luminance = |pixel: u32| -> i32 {
+                let b = (pixel & 0xFF) as i32;
+                let g = ((pixel >> 8) & 0xFF) as i32;
+                let r = ((pixel >> 16) & 0xFF) as i32;
+                (r * 54 + g * 183 + b * 19) >> 8
+            };
+            changed += usize::from((luminance(upper) - luminance(lower)).abs() > 18);
+        }
+        strongest = strongest.max(changed as f32 / sample_count as f32);
+    }
+    strongest
 }
 
 unsafe extern "system" fn wnd_proc(

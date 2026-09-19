@@ -94,15 +94,18 @@ unsafe extern "C" fn add_item_detour(
     let after = inventory_base
         .map(|base| unsafe { inventory_state(base, raw_id) })
         .unwrap_or_default();
-    let genuinely_new =
-        before.readable && after.readable && !before.exists && after.exists && after.is_new;
+    // InsertItem creates the inventory row before the acquisition UI finishes deciding whether
+    // to present its NEW dialog. The row's isNew field can therefore still be false here. Treat a
+    // genuinely new row as a candidate, then let the overlay confirm the actual NEW dialog.
+    let likely_new = before.readable && after.readable && !before.exists && after.exists;
+    let uncertain = !before.readable || !after.readable;
 
     runtime::log_line(&format!(
-        "LorePickup: acquisition gate raw={raw_id:#x}, inventory={inventory_base:?}, before={before:?}, after={after:?}, accepted={genuinely_new}."
+        "LorePickup: acquisition candidate raw={raw_id:#x}, inventory={inventory_base:?}, before={before:?}, after={after:?}, likely_new={likely_new}, uncertain={uncertain}."
     ));
 
-    if genuinely_new {
-        let _ = std::panic::catch_unwind(|| process_pickup(raw_id, quantity));
+    if likely_new || uncertain {
+        let _ = std::panic::catch_unwind(|| process_pickup(raw_id, quantity, likely_new));
     }
 
     ret
@@ -162,7 +165,7 @@ fn plausible_address(address: usize) -> bool {
     (0x1_0000..=0x0000_7FFF_FFFF_FFFF).contains(&address)
 }
 
-fn process_pickup(raw_id: u32, quantity: i32) {
+fn process_pickup(raw_id: u32, quantity: i32, likely_new: bool) {
     if raw_id == 0 {
         return;
     }
@@ -205,13 +208,16 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
     ));
 
-    overlay::enqueue(overlay::LoreEntry {
-        raw_id,
-        param_id,
-        quantity,
-        name,
-        description,
-        icon_id,
-        details,
-    });
+    overlay::stage(
+        overlay::LoreEntry {
+            raw_id,
+            param_id,
+            quantity,
+            name,
+            description,
+            icon_id,
+            details,
+        },
+        likely_new,
+    );
 }
