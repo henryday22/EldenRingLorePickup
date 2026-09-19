@@ -51,31 +51,31 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.0.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.1.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.6.0
-          path: EldenRingLorePickup-v0.6.0.zip
+          name: EldenRingLorePickup-v0.6.1
+          path: EldenRingLorePickup-v0.6.1.zip
 
-      - name: Publish v0.6.0 release
+      - name: Publish v0.6.1 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.0
+          tag_name: v0.6.1
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.6.0 — Vanilla-Synchronised Lore Cards
+          name: LorePickup v0.6.1 — Correct New-Item Gating
           body: |
-            Lore cards now follow Elden Ring's own bottom-centre `NEW item / OK` dialog. If the vanilla dialog is not present, the card does not appear; dismissing it with the game's normal keyboard/controller OK input dismisses the lore card as well. The mod no longer keeps a per-launch "seen" list or uses an independent timer/F8 queue.
+            Corrective release. LorePickup now compares Elden Ring's save-backed inventory before and after AddItem and accepts a pickup only when a genuinely new entry appears with the game's own `IsNew` flag. Repeat materials and the short right-side pickup log no longer trigger or control lore cards.
 
-            The presentation is rebuilt around a supplied, hand-aged translucent vellum card with irregular worn edges and restrained gilding. Text and inventory icons remain fully opaque. The old square-tile dissolve has been replaced with a brief smooth fade and fine gold dust.
+            Cards remain readable for up to 30 seconds and dismiss on a fresh controller Y press after the pickup button has been released. Multiple new items form a visible deck and advance in order. The presentation now uses a lighter hand-aged vellum surface with dark sepia ink, consistent paragraph spacing and a smooth fade without the coarse particle effect.
 
             The full icon bundle is included. Cards retain live weapon requirements, affinity, base attack and Ash of War, armour/talisman guidance and ingredient recipe outputs. Whetblades now explain exactly which affinities they unlock and which stats those affinities favour, including Poison/Blood/Occult guidance for the Black Whetblade.
 
             Extract the DLL, `EldenRingLorePickup-card.png`, and the complete `EldenRingLorePickup-icons` folder into the same ModEngine3 `natives` directory. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup.dll`.
-          files: EldenRingLorePickup-v0.6.0.zip
+          files: EldenRingLorePickup-v0.6.1.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

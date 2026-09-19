@@ -24,6 +24,7 @@ pub struct GameRuntime {
     pub fmg_repo_rva: usize,
     pub fmg_search_rva: usize,
     pub solo_param_slot: usize,
+    pub game_data_man_slot: usize,
     pub label: &'static str,
 }
 
@@ -91,17 +92,31 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
                 fmg_repo_rva: candidate.fmg_repo_rva,
                 fmg_search_rva: candidate.fmg_search_rva,
                 solo_param_slot: find_solo_param_slot(base).unwrap_or(0),
+                game_data_man_slot: find_game_data_man_slot(base).unwrap_or(0),
                 label: candidate.label,
             };
             log_line(&format!(
-                "LorePickup: matched {} (base={:#x}, params={:#x}).",
-                found.label, found.base, found.solo_param_slot
+                "LorePickup: matched {} (base={:#x}, params={:#x}, game_data={:#x}).",
+                found.label, found.base, found.solo_param_slot, found.game_data_man_slot
             ));
             return Ok(found);
         }
     }
 
     Err("known item/message signatures not present".to_string())
+}
+
+/// Resolves the player's embedded EquipInventoryData from the game's persistent save-backed
+/// GameDataMan. This is intentionally independent of the transient AddItem call arguments.
+pub fn player_inventory() -> Option<usize> {
+    let runtime = RUNTIME.get()?;
+    unsafe {
+        let game_data_man = read_ptr(runtime.game_data_man_slot)?;
+        let player_game_data = read_ptr(game_data_man.checked_add(0x08)?)?;
+        player_game_data
+            .checked_add(0x5D0)
+            .filter(|&ptr| plausible(ptr))
+    }
 }
 
 /// Reads the current row's `iconId` from the game's live parameter repository. This keeps
@@ -579,6 +594,26 @@ fn find_solo_param_slot(base: usize) -> Option<usize> {
     const PATTERN: &[i16] = &[
         0x48, 0x8B, 0x0D, -1, -1, -1, -1, 0x48, 0x85, 0xC9, 0x0F, 0x84, -1, -1, -1, -1, 0x45, 0x33,
         0xC0, 0xBA, 0x8E, 0x00, 0x00, 0x00,
+    ];
+
+    let (text, size) = pe_text_section(base)?;
+    let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, size) };
+    let offset = bytes.windows(PATTERN.len()).position(|window| {
+        window
+            .iter()
+            .zip(PATTERN)
+            .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
+    })?;
+    let instruction = text.checked_add(offset)?;
+    let displacement = unsafe { ((instruction + 3) as *const i32).read_unaligned() } as isize;
+    (instruction + 7).checked_add_signed(displacement)
+}
+
+fn find_game_data_man_slot(base: usize) -> Option<usize> {
+    // 48 8B 05 ?? ?? ?? ?? 48 85 C0 74 05 48 8B 40 58 C3 C3
+    const PATTERN: &[i16] = &[
+        0x48, 0x8B, 0x05, -1, -1, -1, -1, 0x48, 0x85, 0xC0, 0x74, 0x05, 0x48, 0x8B, 0x40, 0x58,
+        0xC3, 0xC3,
     ];
 
     let (text, size) = pe_text_section(base)?;
