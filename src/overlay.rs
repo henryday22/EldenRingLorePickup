@@ -10,10 +10,11 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect,
-    GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, SelectObject, SetBkMode,
-    SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, FF_ROMAN, FW_NORMAL, FW_SEMIBOLD, HDC,
-    OUT_TT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, FF_SWISS, FW_NORMAL, FW_SEMIBOLD, HDC, OUT_TT_PRECIS,
+    PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::Graphics::GdiPlus::{
     GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage, GdipDrawImageRectI,
@@ -34,11 +35,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const FADE_IN: Duration = Duration::from_millis(180);
-const FADE_OUT: Duration = Duration::from_millis(920);
-const MAX_CARD_LIFETIME: Duration = Duration::from_secs(30);
-const DISMISS_ARM_DELAY: Duration = Duration::from_millis(180);
-const PANEL_ALPHA: u8 = 224;
+const FADE_IN: Duration = Duration::from_millis(120);
+const FADE_OUT: Duration = Duration::from_millis(160);
+const MAX_CARD_LIFETIME: Duration = Duration::from_secs(90);
+const DISMISS_ARM_DELAY: Duration = Duration::from_millis(100);
+const CANDIDATE_LIFETIME: Duration = Duration::from_millis(1500);
+const PANEL_ALPHA: u8 = 232;
 const CONTENT_ALPHA: u8 = 255;
 // Black is transparent outside the card. The icon has its own dark (not black) tile, which
 // preserves true black artwork while giving antialiased text a clean dark fringe.
@@ -66,14 +68,14 @@ const CLASS_NAME: &[u16] = &[
     0,
 ];
 const FONT_FACE: &[u16] = &[
-    b'G' as u16,
-    b'a' as u16,
-    b'r' as u16,
-    b'a' as u16,
-    b'm' as u16,
+    b'S' as u16,
+    b'e' as u16,
+    b'g' as u16,
     b'o' as u16,
-    b'n' as u16,
-    b'd' as u16,
+    b'e' as u16,
+    b' ' as u16,
+    b'U' as u16,
+    b'I' as u16,
     0,
 ];
 
@@ -89,41 +91,101 @@ pub struct LoreEntry {
 }
 
 struct DisplayState {
+    candidates: VecDeque<CandidateEntry>,
     current: Option<CurrentEntry>,
     pending: VecDeque<LoreEntry>,
-    last_y_down: bool,
+    last_panel_visible: Option<bool>,
+}
+
+struct CandidateEntry {
+    entry: LoreEntry,
+    received_at: Instant,
 }
 
 struct CurrentEntry {
     entry: LoreEntry,
     shown_at: Instant,
     closing_at: Option<Instant>,
-    dismiss_armed: bool,
+    dismiss_ready: bool,
+    saw_game_panel: bool,
 }
 
 impl DisplayState {
     fn new() -> Self {
         Self {
+            candidates: VecDeque::new(),
             current: None,
             pending: VecDeque::new(),
-            last_y_down: false,
+            last_panel_visible: None,
         }
     }
 
-    fn tick(&mut self, y_down: bool, now: Instant) {
+    fn push_candidate(&mut self, entry: LoreEntry, now: Instant) {
+        self.candidates.push_back(CandidateEntry {
+            entry,
+            received_at: now,
+        });
+    }
+
+    fn tick(&mut self, y_down: bool, panel_visible: Option<bool>, now: Instant) {
+        if panel_visible != self.last_panel_visible {
+            if let Some(visible) = panel_visible {
+                crate::runtime::log_line(if visible {
+                    "LorePickup: blocking game popup became visible."
+                } else {
+                    "LorePickup: blocking game popup closed."
+                });
+            }
+            self.last_panel_visible = panel_visible;
+        }
+
+        while self
+            .candidates
+            .front()
+            .map(|candidate| {
+                now.saturating_duration_since(candidate.received_at) > CANDIDATE_LIFETIME
+            })
+            .unwrap_or(false)
+        {
+            if let Some(expired) = self.candidates.pop_front() {
+                crate::runtime::log_line(&format!(
+                    "LorePickup: ignored routine pickup {} ({:#x}); no blocking game popup appeared.",
+                    expired.entry.name, expired.entry.raw_id
+                ));
+            }
+        }
+
+        if panel_visible == Some(true) {
+            while let Some(candidate) = self.candidates.pop_front() {
+                crate::runtime::log_line(&format!(
+                    "LorePickup: confirmed Y-panel item {} ({:#x}, param {}, qty {}).",
+                    candidate.entry.name,
+                    candidate.entry.raw_id,
+                    candidate.entry.param_id,
+                    candidate.entry.quantity
+                ));
+                self.pending.push_back(candidate.entry);
+            }
+        }
+
         if self.current.is_none() {
-            self.advance(now);
+            self.advance(now, panel_visible == Some(true));
         }
 
         if let Some(current) = self.current.as_mut() {
             let age = now.saturating_duration_since(current.shown_at);
-            if !current.dismiss_armed && !y_down && age >= DISMISS_ARM_DELAY {
-                current.dismiss_armed = true;
+            if panel_visible == Some(true) {
+                current.saw_game_panel = true;
+            }
+            if !current.dismiss_ready && !y_down && age >= DISMISS_ARM_DELAY {
+                current.dismiss_ready = true;
             }
 
-            let pressed = y_down && !self.last_y_down;
+            let game_panel_closed = current.saw_game_panel && panel_visible == Some(false);
             if current.closing_at.is_none()
-                && ((current.dismiss_armed && pressed) || age >= MAX_CARD_LIFETIME)
+                && ((current.dismiss_ready && y_down)
+                    || game_panel_closed
+                    || age >= MAX_CARD_LIFETIME)
             {
                 current.closing_at = Some(now);
             }
@@ -134,19 +196,19 @@ impl DisplayState {
                 .unwrap_or(false)
             {
                 self.current = None;
-                self.advance(now);
+                self.advance(now, panel_visible == Some(true));
             }
         }
-        self.last_y_down = y_down;
     }
 
-    fn advance(&mut self, now: Instant) {
+    fn advance(&mut self, now: Instant, panel_visible: bool) {
         if let Some(entry) = self.pending.pop_front() {
             self.current = Some(CurrentEntry {
                 entry,
                 shown_at: now,
                 closing_at: None,
-                dismiss_armed: false,
+                dismiss_ready: false,
+                saw_game_panel: panel_visible,
             });
         }
     }
@@ -177,28 +239,14 @@ static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
 static BACKGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 static CONTENT_HWND: AtomicIsize = AtomicIsize::new(0);
 
-pub fn stage(entry: LoreEntry) {
+pub fn candidate(entry: LoreEntry) {
     let display = DISPLAY.get_or_init(|| Mutex::new(DisplayState::new()));
     if let Ok(mut state) = display.lock() {
         crate::runtime::log_line(&format!(
-            "LorePickup: displaying confirmed-new {} ({:#x}, param {}, qty {}).",
+            "LorePickup: staged presentation candidate {} ({:#x}, param {}, qty {}).",
             entry.name, entry.raw_id, entry.param_id, entry.quantity
         ));
-        state.pending.push_back(entry);
-        if state.current.is_none() {
-            state.advance(Instant::now());
-        }
-    }
-
-    let background = BACKGROUND_HWND.load(Ordering::Relaxed) as HWND;
-    let content = CONTENT_HWND.load(Ordering::Relaxed) as HWND;
-    if !background.is_null() {
-        unsafe {
-            InvalidateRect(background, null(), 0);
-        }
-    }
-    if !content.is_null() {
-        unsafe { InvalidateRect(content, null(), 0) };
+        state.push_candidate(entry, Instant::now());
     }
 }
 
@@ -288,6 +336,7 @@ fn overlay_thread() -> Result<(), String> {
         let mut placement: Option<OverlayPlacement> = None;
         let mut shown = false;
         let mut painted_entry: Option<Instant> = None;
+        let mut painted_queue: Option<usize> = None;
         let mut applied_alpha = 0u8;
         loop {
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -297,12 +346,13 @@ fn overlay_thread() -> Result<(), String> {
 
             let now = Instant::now();
             let y_down = controller_y_down();
+            let panel_visible = crate::runtime::item_panel_visible();
 
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
-                state.tick(y_down, now);
+                state.tick(y_down, panel_visible, now);
                 state.snapshot(now)
             } else {
                 None
@@ -334,21 +384,19 @@ fn overlay_thread() -> Result<(), String> {
                 // The pixels do not change during the hold. Repainting the full-screen layered
                 // window every 16 ms caused GDI to expose its transparent clear between drawing
                 // passes, which looked like the game was flickering through the card.
-                let new_card = painted_entry != Some(snapshot.shown_at);
-                if new_card || alignment_changed {
+                let content_changed = painted_entry != Some(snapshot.shown_at)
+                    || painted_queue != Some(snapshot.queued);
+                if content_changed || alignment_changed {
                     InvalidateRect(background, null(), 0);
                     InvalidateRect(content, null(), 0);
                     painted_entry = Some(snapshot.shown_at);
-                } else if snapshot.closing_age.is_some() {
-                    // Only the rune motes move. The background card is static and fades through
-                    // the layered-window alpha, so repainting it every frame would reintroduce
-                    // the transparency flicker this renderer was designed to avoid.
-                    InvalidateRect(content, null(), 0);
+                    painted_queue = Some(snapshot.queued);
                 }
             } else {
                 // The overlay is a real absence when idle, not an invisible full-screen window.
                 hide_overlay(background, content, &mut shown);
                 painted_entry = None;
+                painted_queue = None;
                 applied_alpha = 0;
             }
 
@@ -359,8 +407,8 @@ fn overlay_thread() -> Result<(), String> {
 
 fn controller_y_down() -> bool {
     // Poll all four XInput slots. The overlay is click-through and never consumes the press; this
-    // simply observes the same Y/OK edge the game receives. A release is required after a card is
-    // created, so the pickup press cannot immediately dismiss the card it just opened.
+    // simply observes the same Y/OK press the game receives. A card is armed only after Y has been
+    // released, so a held press cannot dismiss two cards in a queued stack.
     (0..4).any(|index| unsafe {
         let mut state: XINPUT_STATE = std::mem::zeroed();
         XInputGetState(index, &mut state) == 0 && state.Gamepad.wButtons & XINPUT_GAMEPAD_Y != 0
@@ -621,75 +669,32 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     let entry = &snapshot.entry;
     let width = client.right - client.left;
     let height = client.bottom - client.top;
-    let scale = (height as f32 / 2160.0).clamp(0.58, 1.35);
-    let px = |at_4k: f32| (at_4k * scale).round() as i32;
+    let scale = (height as f32 / 1080.0).clamp(0.78, 1.55);
+    let px = |at_1080: f32| (at_1080 * scale).round() as i32;
 
-    let panel_width = ((width as f32 * 0.235).round() as i32)
-        .clamp(px(700.0), px(980.0))
-        .min((height as f32 * 0.58).round() as i32)
-        .min(width - px(100.0));
-    let margin_right = px(66.0);
-    let pad_x = px(66.0);
-    let pad_top = px(62.0);
-    let pad_bottom = px(66.0);
-    let icon_size = px(148.0).max(72);
-    let icon_gap = px(30.0);
-    let title_size = px(56.0).max(27);
-    let body_size = px(41.0).max(20);
-    let detail_size = px(31.0).max(15);
-    let title_gap = px(25.0);
-    let rule_gap = px(25.0);
+    let panel_width = ((width as f32 * 0.27).round() as i32)
+        .clamp(px(550.0), px(650.0))
+        .min(width - px(88.0));
+    let margin_right = px(34.0);
+    let pad_x = px(28.0);
+    let pad_top = px(26.0);
+    let pad_bottom = px(18.0);
+    let icon_size = px(92.0).max(68);
+    let icon_gap = px(20.0);
+    let title_size = px(31.0).max(24);
+    let body_size = px(20.0).max(16);
+    let detail_size = px(16.0).max(13);
+    let label_size = px(12.0).max(10);
+    let footer_size = px(14.0).max(11);
+    let title_gap = px(20.0);
     let text_width = panel_width - pad_x * 2;
     let title_width = (text_width - icon_size - icon_gap).max(px(280.0));
 
-    let title_font = CreateFontW(
-        -title_size,
-        0,
-        0,
-        0,
-        FW_SEMIBOLD as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.into(),
-        OUT_TT_PRECIS.into(),
-        CLIP_DEFAULT_PRECIS.into(),
-        CLEARTYPE_QUALITY.into(),
-        (DEFAULT_PITCH | FF_ROMAN).into(),
-        FONT_FACE.as_ptr(),
-    );
-    let body_font = CreateFontW(
-        -body_size,
-        0,
-        0,
-        0,
-        FW_NORMAL as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.into(),
-        OUT_TT_PRECIS.into(),
-        CLIP_DEFAULT_PRECIS.into(),
-        CLEARTYPE_QUALITY.into(),
-        (DEFAULT_PITCH | FF_ROMAN).into(),
-        FONT_FACE.as_ptr(),
-    );
-    let detail_font = CreateFontW(
-        -detail_size,
-        0,
-        0,
-        0,
-        FW_SEMIBOLD as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.into(),
-        OUT_TT_PRECIS.into(),
-        CLIP_DEFAULT_PRECIS.into(),
-        CLEARTYPE_QUALITY.into(),
-        (DEFAULT_PITCH | FF_ROMAN).into(),
-        FONT_FACE.as_ptr(),
-    );
+    let title_font = create_ui_font(title_size, FW_SEMIBOLD as i32);
+    let body_font = create_ui_font(body_size, FW_NORMAL as i32);
+    let detail_font = create_ui_font(detail_size, FW_NORMAL as i32);
+    let label_font = create_ui_font(label_size, FW_SEMIBOLD as i32);
+    let footer_font = create_ui_font(footer_size, FW_SEMIBOLD as i32);
 
     SetBkMode(hdc, TRANSPARENT as i32);
 
@@ -700,9 +705,8 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         title_font
     };
     let old_font = SelectObject(hdc, selected_title);
-    let title_height = measure_text(hdc, &entry.name, title_width)
-        .max(title_size + px(8.0))
-        .max(icon_size);
+    let title_text_height = measure_text(hdc, &entry.name, title_width).max(title_size + px(4.0));
+    let header_height = icon_size.max(label_size + px(8.0) + title_text_height);
 
     let selected_body = if body_font.is_null() {
         stock_font
@@ -711,9 +715,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     };
     SelectObject(hdc, selected_body);
     let paragraphs = lore_paragraphs(&entry.description);
-    let paragraph_gap = px(22.0).max(9);
+    let paragraph_gap = px(12.0).max(8);
     let body_height =
-        measure_paragraphs(hdc, &paragraphs, text_width, paragraph_gap).max(body_size + px(8.0));
+        measure_paragraphs(hdc, &paragraphs, text_width, paragraph_gap).max(body_size + px(4.0));
 
     let selected_detail = if detail_font.is_null() {
         stock_font
@@ -721,33 +725,43 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         detail_font
     };
     SelectObject(hdc, selected_detail);
-    let detail_gap = px(12.0).max(5);
+    let detail_label_width = px(122.0).max(92);
+    let detail_value_width = (text_width - detail_label_width - px(12.0)).max(px(230.0));
+    let detail_gap = px(9.0).max(6);
     let details_height = if entry.details.is_empty() {
         0
     } else {
-        px(36.0)
+        label_size
+            + px(16.0)
             + entry
                 .details
                 .iter()
-                .map(|line| measure_text(hdc, line, text_width) + detail_gap)
+                .map(|line| {
+                    let (_, value) = split_detail(line);
+                    measure_text(hdc, value, detail_value_width)
+                        .max(detail_size + px(3.0))
+                        + detail_gap
+                })
                 .sum::<i32>()
     };
+    let footer_height = px(30.0).max(24);
     let natural_height = pad_top
-        + title_height
+        + header_height
         + title_gap
-        + px(1.0)
-        + rule_gap
+        + label_size
+        + px(25.0)
         + body_height
+        + if entry.details.is_empty() { 0 } else { px(31.0) }
         + details_height
+        + px(22.0)
+        + footer_height
         + pad_bottom;
     let panel_height = natural_height
-        .max((panel_width as f32 * 1.40) as i32)
-        .min(height - px(90.0));
+        .max(px(310.0))
+        .min(height - px(76.0));
     let right = width - margin_right;
-    // Elden Ring's pickup strip sits at the lower-right. End the lore card just above it.
-    let bottom_anchor = (height as f32 * 0.755).round() as i32;
-    let bottom = bottom_anchor.max(panel_height + px(40.0));
-    let top = bottom - panel_height;
+    let top = px(38.0);
+    let bottom = top + panel_height;
     let left = right - panel_width;
     let panel = RECT {
         left,
@@ -757,45 +771,59 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     };
 
     if layer == PaintLayer::Background {
-        // A short queue reads visually as a physical deck. Rear cards are the same supplied art,
-        // offset rather than synthetic computer-drawn rectangles.
-        let card_path = crate::icons::card_path();
-        if let Some(path) = card_path.as_deref() {
-            for depth in (1..=snapshot.queued.min(2)).rev() {
-                let shift_x = px(15.0) * depth as i32;
-                let shift_y = px(11.0) * depth as i32;
-                let rear = RECT {
-                    left: panel.left + shift_x,
-                    top: panel.top - shift_y,
-                    right: panel.right + shift_x,
-                    bottom: panel.bottom - shift_y,
-                };
-                draw_png_exact(hdc, &rear, path);
-            }
+        let radius = px(18.0).max(12);
+        let shadow = RECT {
+            left: panel.left + px(5.0),
+            top: panel.top + px(7.0),
+            right: panel.right + px(5.0),
+            bottom: panel.bottom + px(7.0),
+        };
+        draw_rounded_panel(hdc, &shadow, rgb(7, 9, 12), rgb(7, 9, 12), radius, 1);
+
+        // Always render a visible physical stack when another card is queued. Two rear cards are
+        // enough to communicate the deck without consuming more of the game view.
+        for depth in (1..=snapshot.queued.min(2)).rev() {
+            let depth = depth as i32;
+            let shift_x = px(11.0) * depth;
+            let shift_y = px(10.0) * depth;
+            let rear = RECT {
+                left: panel.left - shift_x,
+                top: panel.top + shift_y,
+                right: panel.right - shift_x,
+                bottom: panel.bottom + shift_y,
+            };
+            draw_rounded_panel(
+                hdc,
+                &rear,
+                rgb(31, 36, 44),
+                rgb(92, 103, 117),
+                radius,
+                px(1.0).max(1),
+            );
         }
-        let drawn = card_path
-            .map(|path| draw_png_exact(hdc, &panel, &path))
-            .unwrap_or(false);
-        if !drawn {
-            let panel_brush = CreateSolidBrush(rgb(28, 24, 18));
-            FillRect(hdc, &panel, panel_brush);
-            DeleteObject(panel_brush);
-        }
+
+        draw_rounded_panel(
+            hdc,
+            &panel,
+            rgb(20, 24, 30),
+            rgb(86, 98, 113),
+            radius,
+            px(1.0).max(1),
+        );
+        let accent = RECT {
+            left: panel.left,
+            top: panel.top + radius,
+            right: panel.left + px(4.0).max(3),
+            bottom: panel.bottom - radius,
+        };
+        let accent_brush = CreateSolidBrush(rgb(201, 161, 78));
+        FillRect(hdc, &accent, accent_brush);
+        DeleteObject(accent_brush);
 
         SelectObject(hdc, old_font);
-        if !title_font.is_null() {
-            DeleteObject(title_font);
-        }
-        if !body_font.is_null() {
-            DeleteObject(body_font);
-        }
-        if !detail_font.is_null() {
-            DeleteObject(detail_font);
-        }
+        delete_fonts(&[title_font, body_font, detail_font, label_font, footer_font]);
         return;
     }
-
-    let ink = 1.0;
 
     let text_left = left + pad_x;
     let text_right = right - pad_x;
@@ -807,51 +835,71 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         right: text_left + icon_size,
         bottom: y + icon_size,
     };
-    if ink > 0.12 {
-        draw_icon_panel(hdc, &icon_rect, entry, px);
-    }
+    draw_icon_panel(hdc, &icon_rect, entry, px);
 
+    let header_left = icon_rect.right + icon_gap;
+    SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
+    draw_text_coloured(
+        hdc,
+        if entry.quantity > 1 {
+            &format!("ITEM LORE  •  ×{}", entry.quantity)
+        } else {
+            "ITEM LORE"
+        },
+        header_left,
+        y,
+        text_right,
+        y + label_size + px(5.0),
+        rgb(198, 160, 81),
+        DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
+    );
     SelectObject(hdc, selected_title);
-    draw_shadowed_text(
+    draw_text_coloured(
         hdc,
         &entry.name,
-        icon_rect.right + icon_gap,
-        y + ((title_height - measure_text(hdc, &entry.name, title_width)) / 2).max(0),
+        header_left,
+        y + label_size + px(8.0),
         text_right,
-        y + title_height,
-        fade_colour(232, 224, 202, ink),
-        0,
+        y + header_height,
+        rgb(246, 247, 249),
+        DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
     );
-    y += title_height + title_gap;
+    if snapshot.queued > 0 {
+        let counter = format!("{} CARDS", snapshot.queued + 1);
+        SelectObject(hdc, if footer_font.is_null() { stock_font } else { footer_font });
+        draw_text_coloured(
+            hdc,
+            &counter,
+            header_left,
+            y,
+            text_right,
+            y + label_size + px(5.0),
+            rgb(158, 169, 182),
+            DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+    }
+    y += header_height + title_gap;
 
-    let old_pen = SelectObject(
-        hdc,
-        CreatePen(PS_SOLID, px(2.0).max(1), fade_colour(157, 126, 72, ink)),
-    );
+    let rule = CreatePen(PS_SOLID, px(1.0).max(1), rgb(66, 76, 88));
+    let old_pen = SelectObject(hdc, rule);
     MoveToEx(hdc, text_left, y, null_mut());
     LineTo(hdc, text_right, y);
-    let ornament = px(9.0).max(4);
-    let ornament_brush = CreateSolidBrush(fade_colour(157, 126, 72, ink));
-    let old_brush = SelectObject(hdc, ornament_brush);
-    Ellipse(
+    SelectObject(hdc, old_pen);
+    DeleteObject(rule);
+    y += px(15.0);
+
+    SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
+    draw_text_coloured(
         hdc,
-        text_left - ornament / 2,
-        y - ornament / 2,
-        text_left + ornament / 2,
-        y + ornament / 2,
+        "LORE",
+        text_left,
+        y,
+        text_right,
+        y + label_size + px(4.0),
+        rgb(150, 163, 178),
+        DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
     );
-    Ellipse(
-        hdc,
-        text_right - ornament / 2,
-        y - ornament / 2,
-        text_right + ornament / 2,
-        y + ornament / 2,
-    );
-    SelectObject(hdc, old_brush);
-    DeleteObject(ornament_brush);
-    let rule_pen = SelectObject(hdc, old_pen);
-    DeleteObject(rule_pen);
-    y += rule_gap;
+    y += label_size + px(10.0);
 
     SelectObject(hdc, selected_body);
     y = draw_paragraphs(
@@ -861,125 +909,236 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y,
         text_right,
         paragraph_gap,
-        fade_colour(221, 214, 195, ink),
-        px(1.0),
+        rgb(224, 229, 234),
     );
 
     if !entry.details.is_empty() {
-        y += px(23.0);
-        let separator = CreatePen(PS_SOLID, px(1.0).max(1), fade_colour(135, 108, 66, ink));
+        y += px(21.0);
+        let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(58, 68, 80));
         let previous = SelectObject(hdc, separator);
         MoveToEx(hdc, text_left, y, null_mut());
         LineTo(hdc, text_right, y);
         SelectObject(hdc, previous);
         DeleteObject(separator);
-        y += px(20.0);
-        SelectObject(hdc, selected_detail);
+        y += px(14.0);
+        SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
+        draw_text_coloured(
+            hdc,
+            "ITEM DETAILS",
+            text_left,
+            y,
+            text_right,
+            y + label_size + px(4.0),
+            rgb(150, 163, 178),
+            DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        y += label_size + px(12.0);
+
         for line in &entry.details {
-            let line_height = measure_text(hdc, line, text_width).max(detail_size + px(3.0));
-            draw_shadowed_text(
+            let (label, value) = split_detail(line);
+            SelectObject(hdc, selected_detail);
+            let line_height = measure_text(hdc, value, detail_value_width)
+                .max(detail_size + px(3.0));
+            SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
+            draw_text_coloured(
                 hdc,
-                line,
+                label,
                 text_left,
+                y,
+                text_left + detail_label_width,
+                y + line_height,
+                rgb(201, 161, 78),
+                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
+            );
+            SelectObject(hdc, selected_detail);
+            draw_text_coloured(
+                hdc,
+                value,
+                text_left + detail_label_width + px(12.0),
                 y,
                 text_right,
                 y + line_height,
-                fade_colour(190, 157, 96, ink),
-                px(1.0),
+                rgb(235, 238, 241),
+                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
             y += line_height + detail_gap;
         }
     }
 
-    if let Some(closing_age) = snapshot.closing_age {
-        draw_rune_sparks(hdc, &panel, closing_age, px);
-    }
+    let footer_top = panel.bottom - pad_bottom - footer_height;
+    draw_footer(
+        hdc,
+        text_left,
+        footer_top,
+        text_right,
+        footer_height,
+        snapshot.queued,
+        if footer_font.is_null() { stock_font } else { footer_font },
+        px,
+    );
 
     SelectObject(hdc, old_font);
-    if !title_font.is_null() {
-        DeleteObject(title_font);
-    }
-    if !body_font.is_null() {
-        DeleteObject(body_font);
-    }
-    if !detail_font.is_null() {
-        DeleteObject(detail_font);
+    delete_fonts(&[title_font, body_font, detail_font, label_font, footer_font]);
+}
+
+unsafe fn create_ui_font(size: i32, weight: i32) -> *mut std::ffi::c_void {
+    CreateFontW(
+        -size,
+        0,
+        0,
+        0,
+        weight,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.into(),
+        OUT_TT_PRECIS.into(),
+        CLIP_DEFAULT_PRECIS.into(),
+        CLEARTYPE_QUALITY.into(),
+        (DEFAULT_PITCH | FF_SWISS).into(),
+        FONT_FACE.as_ptr(),
+    )
+}
+
+unsafe fn delete_fonts(fonts: &[*mut std::ffi::c_void]) {
+    for &font in fonts {
+        if !font.is_null() {
+            DeleteObject(font);
+        }
     }
 }
 
-/// A dense field of tiny deterministic motes inspired by Elden Ring's rune wisps.  The particles
-/// are one or two physical pixels at normal play resolutions, with short tapered-looking trails;
-/// no coarse grid, blocks or bitmap scaling are involved.
-unsafe fn draw_rune_sparks(hdc: HDC, panel: &RECT, age: Duration, px: impl Fn(f32) -> i32 + Copy) {
-    let progress = (age.as_secs_f32() / FADE_OUT.as_secs_f32()).clamp(0.0, 1.0);
-    let panel_width = (panel.right - panel.left).max(1);
-    let panel_height = (panel.bottom - panel.top).max(1);
+fn split_detail(line: &str) -> (&str, &str) {
+    line.split_once("  ")
+        .map(|(label, value)| (label.trim(), value.trim()))
+        .unwrap_or(("INFO", line.trim()))
+}
 
-    let pens = [
-        CreatePen(PS_SOLID, 1, rgb(102, 75, 30)),
-        CreatePen(PS_SOLID, 1, rgb(181, 132, 48)),
-        CreatePen(PS_SOLID, px(2.0).max(1), rgb(238, 196, 89)),
-    ];
-    let original_pen = SelectObject(hdc, pens[0]);
+unsafe fn draw_rounded_panel(
+    hdc: HDC,
+    rect: &RECT,
+    fill: u32,
+    border: u32,
+    radius: i32,
+    border_width: i32,
+) {
+    let brush = CreateSolidBrush(fill);
+    let pen = CreatePen(PS_SOLID, border_width.max(1), border);
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, pen);
+    RoundRect(
+        hdc,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        radius,
+        radius,
+    );
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
 
-    for index in 0..480u32 {
-        let h1 = spark_hash(index.wrapping_mul(4).wrapping_add(1));
-        let h2 = spark_hash(index.wrapping_mul(4).wrapping_add(2));
-        let h3 = spark_hash(index.wrapping_mul(4).wrapping_add(3));
-        let h4 = spark_hash(index.wrapping_mul(4).wrapping_add(4));
-        let unit = |value: u32| value as f32 / u32::MAX as f32;
+unsafe fn draw_text_coloured(
+    hdc: HDC,
+    text: &str,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    colour: u32,
+    flags: u32,
+) {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    if wide.is_empty() {
+        return;
+    }
+    SetTextColor(hdc, colour);
+    let mut rect = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    DrawTextW(hdc, wide.as_ptr(), wide.len() as i32, &mut rect, flags);
+}
 
-        let delay = unit(h4) * 0.38;
-        if progress <= delay {
-            continue;
-        }
-        let local = ((progress - delay) / (1.0 - delay)).clamp(0.0, 1.0);
-        let life = (1.0 - local).powf(0.72);
-        if life < 0.06 {
-            continue;
-        }
+unsafe fn draw_footer(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    height: i32,
+    queued: usize,
+    font: *mut std::ffi::c_void,
+    px: impl Fn(f32) -> i32 + Copy,
+) {
+    let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(58, 68, 80));
+    let old_pen = SelectObject(hdc, separator);
+    MoveToEx(hdc, left, top - px(10.0), null_mut());
+    LineTo(hdc, right, top - px(10.0));
+    SelectObject(hdc, old_pen);
+    DeleteObject(separator);
 
-        let start_x = panel.left as f32 + unit(h1) * panel_width as f32;
-        let start_y = panel.top as f32 + unit(h2) * panel_height as f32;
-        let sweep = px(120.0 + unit(h3) * 430.0) as f32;
-        let rise = px(35.0 + unit(h4.rotate_left(11)) * 245.0) as f32;
-        let flutter = ((local * 9.0 + unit(h1.rotate_left(7)) * 6.283).sin())
-            * px(15.0 + unit(h2.rotate_left(9)) * 32.0) as f32;
-        let x = start_x - sweep * local.powf(1.18);
-        let y = start_y - rise * local + flutter;
-        let trail = px(2.0 + unit(h3.rotate_left(13)) * 9.0).max(1) as f32;
-
-        let brightness = ((unit(h2.rotate_left(5)) * 3.0) as usize).min(2);
-        SelectObject(hdc, pens[brightness]);
-        MoveToEx(hdc, x.round() as i32, y.round() as i32, null_mut());
-        LineTo(
+    SelectObject(hdc, font);
+    let button = height.min(px(24.0)).max(20);
+    let cy = top + height / 2;
+    let button_rect = RECT {
+        left,
+        top: cy - button / 2,
+        right: left + button,
+        bottom: cy + button / 2,
+    };
+    let brush = CreateSolidBrush(rgb(201, 161, 78));
+    let pen = CreatePen(PS_SOLID, 1, rgb(225, 190, 117));
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, pen);
+    Ellipse(
+        hdc,
+        button_rect.left,
+        button_rect.top,
+        button_rect.right,
+        button_rect.bottom,
+    );
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+    draw_text_coloured(
+        hdc,
+        "Y",
+        button_rect.left,
+        button_rect.top,
+        button_rect.right,
+        button_rect.bottom,
+        rgb(18, 22, 27),
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+    draw_text_coloured(
+        hdc,
+        "Dismiss",
+        button_rect.right + px(9.0),
+        top,
+        right,
+        top + height,
+        rgb(174, 184, 195),
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+    if queued > 0 {
+        let remaining = format!("{} more", queued);
+        draw_text_coloured(
             hdc,
-            (x + trail * life).round() as i32,
-            (y + trail * 0.16 * life).round() as i32,
+            &remaining,
+            left,
+            top,
+            right,
+            top + height,
+            rgb(174, 184, 195),
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
     }
-
-    SelectObject(hdc, original_pen);
-    for pen in pens {
-        DeleteObject(pen);
-    }
-}
-
-fn spark_hash(mut value: u32) -> u32 {
-    value ^= value >> 16;
-    value = value.wrapping_mul(0x7FEB_352D);
-    value ^= value >> 15;
-    value = value.wrapping_mul(0x846C_A68B);
-    value ^ (value >> 16)
-}
-
-fn fade_colour(r: u8, g: u8, b: u8, opacity: f32) -> u32 {
-    let opacity = opacity.clamp(0.0, 1.0);
-    rgb(
-        (r as f32 * opacity).round() as u8,
-        (g as f32 * opacity).round() as u8,
-        (b as f32 * opacity).round() as u8,
-    )
 }
 
 unsafe fn draw_icon_panel(
@@ -990,29 +1149,17 @@ unsafe fn draw_icon_panel(
 ) {
     // The icon tile is intentionally opaque so PNG transparency and true black survive the
     // colour-keyed content layer cleanly.
-    let backing = CreateSolidBrush(rgb(8, 8, 7));
+    let backing = CreateSolidBrush(rgb(27, 32, 39));
     FillRect(hdc, rect, backing);
     DeleteObject(backing);
 
     let old_brush = SelectObject(hdc, GetStockObject(5)); // NULL_BRUSH
-    let pen = CreatePen(PS_SOLID, px(2.0).max(1), rgb(152, 121, 68));
+    let pen = CreatePen(PS_SOLID, px(1.0).max(1), rgb(75, 86, 99));
     let old_pen = SelectObject(hdc, pen);
     Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
-
-    let inset = px(8.0).max(3);
-    let inner = CreatePen(PS_SOLID, px(1.0).max(1), rgb(73, 61, 39));
-    SelectObject(hdc, inner);
-    Rectangle(
-        hdc,
-        rect.left + inset,
-        rect.top + inset,
-        rect.right - inset,
-        rect.bottom - inset,
-    );
     SelectObject(hdc, old_pen);
     SelectObject(hdc, old_brush);
     DeleteObject(pen);
-    DeleteObject(inner);
 
     let drawn = entry
         .icon_id
@@ -1172,11 +1319,10 @@ unsafe fn draw_paragraphs(
     right: i32,
     gap: i32,
     colour: u32,
-    shadow_offset: i32,
 ) -> i32 {
     for (index, paragraph) in paragraphs.iter().enumerate() {
         let height = measure_text(hdc, paragraph, right - left);
-        draw_shadowed_text(
+        draw_text_coloured(
             hdc,
             paragraph,
             left,
@@ -1184,7 +1330,7 @@ unsafe fn draw_paragraphs(
             right,
             top + height,
             colour,
-            shadow_offset,
+            DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
         );
         top += height;
         if index + 1 < paragraphs.len() {
@@ -1192,51 +1338,6 @@ unsafe fn draw_paragraphs(
         }
     }
     top
-}
-
-unsafe fn draw_shadowed_text(
-    hdc: HDC,
-    text: &str,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    colour: u32,
-    shadow_offset: i32,
-) {
-    SetTextColor(hdc, rgb(4, 4, 4));
-    draw_text(
-        hdc,
-        text,
-        left + shadow_offset,
-        top + shadow_offset,
-        right + shadow_offset,
-        bottom + shadow_offset,
-    );
-    SetTextColor(hdc, colour);
-    draw_text(hdc, text, left, top, right, bottom);
-}
-
-unsafe fn draw_text(hdc: HDC, text: &str, left: i32, top: i32, right: i32, bottom: i32) {
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    if wide.is_empty() {
-        return;
-    }
-
-    let mut rect = RECT {
-        left,
-        top,
-        right,
-        bottom,
-    };
-
-    DrawTextW(
-        hdc,
-        wide.as_ptr(),
-        wide.len() as i32,
-        &mut rect,
-        DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
-    );
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {

@@ -29,7 +29,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/EldenRingLorePickup.dll dist/EldenRingLorePickup.dll
-          Copy-Item assets/EldenRingLorePickup-card.png dist/EldenRingLorePickup-card.png
           Copy-Item README.md dist/README.md
           Copy-Item LorePickup.me3.example dist/LorePickup.me3.example
           Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
@@ -51,33 +50,33 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.7.0.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.8.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.7.0
-          path: EldenRingLorePickup-v0.7.0.zip
+          name: EldenRingLorePickup-v0.8.0
+          path: EldenRingLorePickup-v0.8.0.zip
 
-      - name: Publish v0.7.0 release
+      - name: Publish v0.8.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.7.0
+          tag_name: v0.8.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.7.0 — Exact Y-Panel Trigger and Rebuilt Card
+          name: LorePickup v0.8.0 — Game-State Trigger and Modern UI
           body: |
-            This revision replaces all inferred pickup gating with a direct hook into Elden Ring's large item-panel function. If the game opens the panel that must be dismissed with Y/OK, LorePickup receives the same item ID and opens a card. This includes panels for repeat or otherwise non-new items such as Soft Cotton. Small right-side pickup logs do not call this function and remain ignored.
+            v0.8.0 replaces the parchment/card-art experiment with a compact modern interface: a translucent charcoal panel, fully opaque Segoe UI text and inventory icon, consistently spaced lore paragraphs, aligned information rows and an unmistakable offset stack when several cards are waiting. Dismissal is now a clean 160 ms fade with no simulated particles.
 
-            The item-panel address is found by a checked executable signature and the mod remains inert if it cannot be resolved uniquely. Inventory state and HDR-sensitive screen capture are no longer used to decide whether a card should appear.
+            More importantly, the trigger has been rebuilt. The item presentation hook now creates only a short-lived candidate. LorePickup promotes it only while Elden Ring's own frontend manager reports the blocking PopupMenu HUD state used by the large Y/OK item panel. Ordinary pickups that produce only the small right-side log remain in the Default state and are discarded. Repeat items still qualify whenever the game itself presents the blocking panel.
 
-            The card artwork has been rebuilt as a larger and wider smoke-darkened vellum object with restrained damaged gold leaf. Typography is now ivory and muted gold, with more room for the title and lore. The old plain fade is replaced by a 920 ms field of 480 individually drawn tiny rune motes and short gold trails; there are no scaled particle sprites or coarse blocks. Only the moving foreground is repainted during dismissal to protect the game image from transparency flicker.
+            The same Y press dismisses both displays. The next stacked card is protected until Y is released, so a held press cannot skip multiple cards. Cards also close when the game panel closes and include a 90-second safety timeout.
 
-            The full icon bundle is included. Cards retain live weapon requirements, affinity, base attack and Ash of War, armour/talisman guidance and ingredient recipe outputs. Whetblades now explain exactly which affinities they unlock and which stats those affinities favour, including Poison/Blood/Occult guidance for the Black Whetblade.
+            Weapon rows now prioritise affinity, requirements, base damage and skill, followed by likely build use; defensive resistances are intentionally omitted. Ingredients retain live recipe outputs, Whetblades retain affinity/stat guidance, and the complete icon bundle is included.
 
-            Replace both the DLL and `EldenRingLorePickup-card.png` in `profiles/natives/EldenRingLorePickup/`. The icon folder and `.me3` profile do not need to change.
-          files: EldenRingLorePickup-v0.7.0.zip
+            Existing users only need to replace `EldenRingLorePickup.dll`. Keep the icon folder and the existing `.me3` entry. The old `EldenRingLorePickup-card.png` is no longer read and can be deleted.
+          files: EldenRingLorePickup-v0.8.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

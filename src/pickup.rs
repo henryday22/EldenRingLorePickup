@@ -11,6 +11,7 @@ static HOOK: OnceLock<GenericDetour<ItemPopupFn>> = OnceLock::new();
 
 const POPUP_ID_OFFSET: usize = 0x00;
 const POPUP_QUANTITY_OFFSET: usize = 0x04;
+const POPUP_KIND_OFFSET: usize = 0x08;
 const POPUP_GEM_OFFSET: usize = 0x0C;
 
 pub fn install() -> Result<(), String> {
@@ -59,6 +60,11 @@ unsafe extern "C" fn item_popup_detour(manager: *mut c_void, entry: *mut c_void)
         unsafe { ((entry as *const u8).add(POPUP_QUANTITY_OFFSET) as *const i32).read_unaligned() }
             .max(1)
     };
+    let kind = if entry.is_null() {
+        0
+    } else {
+        unsafe { ((entry as *const u8).add(POPUP_KIND_OFFSET) as *const u32).read_unaligned() }
+    };
     let gem = if entry.is_null() {
         0
     } else {
@@ -71,7 +77,7 @@ unsafe extern "C" fn item_popup_detour(manager: *mut c_void, entry: *mut c_void)
         .unwrap_or(0);
 
     runtime::log_line(&format!(
-        "LorePickup: Y-dismissable item panel raw={raw_id:#x}, quantity={quantity}, gem={gem:#x}."
+        "LorePickup: item presentation candidate raw={raw_id:#x}, quantity={quantity}, kind={kind:#x}, gem={gem:#x}."
     ));
 
     let _ = std::panic::catch_unwind(|| process_popup(raw_id, quantity));
@@ -122,7 +128,7 @@ fn process_popup(raw_id: u32, quantity: i32) {
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
     ));
 
-    overlay::stage(overlay::LoreEntry {
+    overlay::candidate(overlay::LoreEntry {
         raw_id,
         param_id,
         quantity,
