@@ -5,18 +5,19 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetStockObject, SelectObject,
-    SetBkMode, SetTextColor, DEFAULT_GUI_FONT, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetStockObject, InvalidateRect, SelectObject, SetBkMode, SetTextColor, DEFAULT_GUI_FONT,
+    DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, HDC, PAINTSTRUCT, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ClientToScreen, CreateWindowExW, DefWindowProcW, DispatchMessageW, DrawTextW, EnumWindows,
-    GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, InvalidateRect, IsWindowVisible,
-    PeekMessageW, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, DT_LEFT, DT_NOPREFIX, DT_WORDBREAK, HTTRANSPARENT,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClientRect,
+    GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, RegisterClassW,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, HTTRANSPARENT,
     HWND_TOPMOST, LWA_ALPHA, LWA_COLORKEY, MSG, PM_REMOVE, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
     SWP_SHOWWINDOW, WM_ERASEBKGND, WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -221,7 +222,7 @@ struct FindContext {
     best_area: i64,
 }
 
-unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> i32 {
     let ctx = &mut *(lparam as *mut FindContext);
 
     if hwnd == ctx.overlay || IsWindowVisible(hwnd) == 0 {
@@ -361,7 +362,7 @@ unsafe fn paint(hwnd: HWND) {
     EndPaint(hwnd, &ps);
 }
 
-unsafe fn draw_text(hdc: isize, text: &str, left: i32, top: i32, right: i32, bottom: i32) {
+unsafe fn draw_text(hdc: HDC, text: &str, left: i32, top: i32, right: i32, bottom: i32) {
     let wide: Vec<u16> = text.encode_utf16().collect();
     if wide.is_empty() {
         return;
