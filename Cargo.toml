@@ -1,0 +1,27 @@
+[package]
+name = "elden-ring-lore-pickup"
+version = "0.1.0"
+edition = "2021"
+description = "Show Elden Ring item lore automatically when an item is acquired."
+repository = "https://github.com/henryday22/EldenRingLorePickup"
+
+[lib]
+name = "EldenRingLorePickup"
+crate-type = ["cdylib"]
+
+[dependencies]
+hudhook = { version = "0.9.3", default-features = false, features = ["dx12"] }
+imgui = "0.12"
+retour = "0.3"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
