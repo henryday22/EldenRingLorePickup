@@ -6,8 +6,8 @@ The aim is simple: Elden Ring hides a huge amount of its story in item descripti
 
 ## Current status
 
-**Early alpha. v0.3.1 proved the redesigned, flicker-free pickup-to-overlay path in game. v0.4
-adds independently composited translucency, a gilded frame and inventory icons.**
+**Early alpha. v0.5 adds an ornate stacked-card queue, rune-dust transitions, manual dismissal,
+more reliable inventory icons and live item-use details.**
 
 The first implementation is now in this repository. It:
 
@@ -17,7 +17,7 @@ The first implementation is now in this repository. It:
 - supports weapons, armour, talismans, goods and Ashes of War;
 - searches base-game, DLC1 and DLC2 message tables;
 - de-duplicates items during a session so repeat consumable pickups do not spam the panel;
-- queues rapid multi-item pickups instead of overwriting them;
+- presents rapid multi-item pickups as a visible deck instead of making the queue invisible;
 - uses a click-through Win32 overlay window above the game's pickup strip, with no DirectX Present hook;
 - resolves each pickup's live `iconId` from the game's parameter repository, with a built-in
   base-game mapping fallback;
@@ -26,7 +26,7 @@ The first implementation is now in this repository. It:
 ## Download
 
 Download the ready-to-install package from the
-[v0.4.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.4.0).
+[v0.5.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.5.0).
 It contains the DLL and the complete compact icon folder.
 
 The runtime addresses currently cover the 2.6.2.0, 2.7.0.0 and 2.7.1.0 executable families used by the current 1.17-era modding stack. Signature checks are mandatory before either hook or message lookup is used.
@@ -68,25 +68,30 @@ ME3 resolves native paths relative to the .me3 profile.
 
 ## Behaviour
 
-The v0.4 card:
+The v0.5 card:
 
 - appears above the game's lower-right item-pickup notification;
-- shows only the item name and full lore caption, with no mechanical summary or debug metadata;
+- uses a narrower, taller playing-card proportion with consistent paragraph spacing;
 - uses a translucent charcoal panel while keeping its typography, icon and frame fully opaque;
 - scales with the game window and uses large Garamond typography, ivory text and restrained
   double-line gold edging;
 - shows the item's actual inventory thumbnail in a small gilded tile, with a category medallion
   fallback if a custom/modded icon is not supplied;
-- stays visible for at least 20 seconds and extends up to 32 seconds for long descriptions;
-- fades in and out rather than appearing abruptly;
+- displays live weapon requirements, affinity, base attack and Ash of War; armour/talisman load
+  guidance; and crafting outputs for ingredients where the recipe params expose them;
+- stays visible for 14–24 seconds, shortening the wait when more cards are queued;
+- shows up to three queued cards behind the current card, with a total deck count;
+- dismisses the current card with **F8** and advances to the next queued pickup;
+- dissolves the outgoing card into gold, rune-like dust instead of simply disappearing;
 - composes each card off-screen and presents it atomically to prevent transparency flicker;
 - completely hides the overlay window when there is no lore to show;
 - then advances to the next queued pickup;
 - ignores an exact item after it has already been shown in the current game session.
 
-The DLL looks for thumbnails beside itself in `EldenRingLorePickup-icons`. The test archive ships
-that folder ready to use. Icon selection prefers the game's live parameter value, so DLC and
-parameter mods can choose the correct numbered image without changing the DLL.
+The DLL looks for thumbnails beside itself in `EldenRingLorePickup-icons`. The release archive
+ships that folder ready to use. Icon selection prefers a valid live parameter value, verifies that
+the corresponding PNG exists, and then falls back to the bundled base-game mapping. A zero live
+ID can no longer mask a valid item icon.
 
 ## Compatibility note
 

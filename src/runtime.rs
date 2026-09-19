@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -157,6 +158,300 @@ pub fn lookup_icon_id(category: u32, param_id: u32) -> Option<u32> {
     None
 }
 
+/// Compact, factual item data used by the card's lower information panel.
+pub fn lookup_item_details(category: u32, param_id: u32, info: Option<&str>) -> Vec<String> {
+    let mut lines = match category {
+        0x0000_0000 => weapon_details(param_id),
+        0x1000_0000 => weight_details(0xD0, param_id, 0x24, "Armour", true),
+        0x2000_0000 => weight_details(0x118, param_id, 0x0C, "Talisman", false),
+        0x4000_0000 => goods_details(param_id),
+        0x8000_0000 => vec!["TYPE  Ash of War".to_string()],
+        _ => Vec::new(),
+    };
+
+    if let Some(summary) = info.map(str::trim).filter(|text| !text.is_empty()) {
+        let summary = compact_summary(&summary.replace(['\r', '\n'], " "), 180);
+        if !lines.iter().any(|line| line.contains(&summary)) {
+            lines.insert(0, format!("EFFECT  {summary}"));
+        }
+    }
+    lines
+}
+
+fn compact_summary(text: &str, max_chars: usize) -> String {
+    let mut result = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        while result.ends_with(char::is_whitespace) {
+            result.pop();
+        }
+        result.push('…');
+    }
+    result
+}
+
+fn weapon_details(param_id: u32) -> Vec<String> {
+    let Some(row) = param_row(0x88, param_id) else {
+        return vec!["TYPE  Weapon".to_string()];
+    };
+
+    unsafe {
+        let requirements = [
+            ("STR", read_u8(row + 0xF2)),
+            ("DEX", read_u8(row + 0xF3)),
+            ("INT", read_u8(row + 0xF4)),
+            ("FAI", read_u8(row + 0xF5)),
+            ("ARC", read_u8(row + 0x195)),
+        ];
+        let req = requirements
+            .iter()
+            .filter_map(|(name, value)| value.filter(|&v| v > 0).map(|v| format!("{name} {v}")))
+            .collect::<Vec<_>>();
+
+        let damage = [
+            ("Physical", read_u16(row + 0xC8)),
+            ("Magic", read_u16(row + 0xCA)),
+            ("Fire", read_u16(row + 0xCC)),
+            ("Lightning", read_u16(row + 0xCE)),
+            ("Holy", read_u16(row + 0x18C)),
+        ];
+        let affinities = damage
+            .iter()
+            .filter_map(|(name, value)| value.filter(|&v| v > 0).map(|v| format!("{name} {v}")))
+            .collect::<Vec<_>>();
+
+        let corrections = [
+            ("Strength", read_f32(row + 0x24).unwrap_or(0.0)),
+            ("Dexterity", read_f32(row + 0x28).unwrap_or(0.0)),
+            ("Intelligence", read_f32(row + 0x2C).unwrap_or(0.0)),
+            ("Faith", read_f32(row + 0x30).unwrap_or(0.0)),
+            ("Arcane", read_f32(row + 0x19C).unwrap_or(0.0)),
+        ];
+        let mut ranked = corrections.to_vec();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let build = if ranked[0].1 <= 0.0 {
+            "Any build".to_string()
+        } else if ranked[1].1 >= ranked[0].1 * 0.82 {
+            format!("{} / {} build", ranked[0].0, ranked[1].0)
+        } else {
+            format!("{} build", ranked[0].0)
+        };
+
+        let affinity = affinity_label(param_id);
+        let mut lines = vec![format!("BUILD  {build}"), format!("AFFINITY  {affinity}")];
+        if !req.is_empty() {
+            lines.push(format!("REQUIRES  {}", req.join(" · ")));
+        }
+        if !affinities.is_empty() {
+            lines.push(format!("BASE ATTACK  {}", affinities.join(" · ")));
+        }
+        if let Some(arts_id) = read_i32(row + 0x198).filter(|&id| id > 0) {
+            if let Some(runtime) = RUNTIME.get() {
+                if let Some(name) = lookup_first(runtime, &[42, 331, 431], arts_id as u32) {
+                    lines.push(format!("SKILL  {name}"));
+                }
+            }
+        }
+        lines
+    }
+}
+
+fn weight_details(
+    param_offset: usize,
+    param_id: u32,
+    weight_offset: usize,
+    label: &str,
+    classify_load: bool,
+) -> Vec<String> {
+    let Some(row) = param_row(param_offset, param_id) else {
+        return vec![format!("TYPE  {label}")];
+    };
+    let weight = unsafe { read_f32(row + weight_offset) }.unwrap_or(0.0);
+    let class = if weight < 4.0 {
+        "Light"
+    } else if weight < 8.0 {
+        "Medium"
+    } else {
+        "Heavy"
+    };
+    if classify_load {
+        vec![format!("LOAD  {class} {label} · {weight:.1} weight")]
+    } else {
+        vec![format!("BUILD  Any build · {label} · {weight:.1} weight")]
+    }
+}
+
+fn goods_details(param_id: u32) -> Vec<String> {
+    let Some(row) = param_row(0x160, param_id) else {
+        return vec!["TYPE  Item".to_string()];
+    };
+    let goods_type = unsafe { read_u8(row + 0x3E) }.unwrap_or(0);
+    let mut lines = vec![format!("TYPE  {}", goods_type_label(goods_type))];
+    let recipes = crafting_outputs(param_id);
+    if !recipes.is_empty() {
+        lines.push(format!("CRAFTS  {}", recipes.join(" · ")));
+    }
+    lines
+}
+
+fn goods_type_label(goods_type: u8) -> &'static str {
+    match goods_type {
+        0 => "Item",
+        1 => "Key item",
+        2 => "Crafting material",
+        3 => "Remembrance",
+        5 => "Sorcery",
+        7 => "Spirit summon",
+        8 => "Great spirit summon",
+        9 => "Wondrous Physick",
+        10 => "Crystal tear",
+        11 => "Regenerative material",
+        12 => "Info item",
+        14 => "Reinforcement material",
+        15 => "Great Rune",
+        16 => "Incantation",
+        _ => "Item",
+    }
+}
+
+fn affinity_label(param_id: u32) -> &'static str {
+    match (param_id / 100) % 100 {
+        1 => "Heavy",
+        2 => "Keen",
+        3 => "Quality",
+        4 => "Fire",
+        5 => "Flame Art",
+        6 => "Lightning",
+        7 => "Sacred",
+        8 => "Magic",
+        9 => "Cold",
+        10 => "Poison",
+        11 => "Blood",
+        12 => "Occult",
+        _ => "Standard",
+    }
+}
+
+fn crafting_outputs(material_id: u32) -> Vec<String> {
+    let Some(recipe_param) = param_base(0x868) else {
+        return Vec::new();
+    };
+    let Some(material_param) = param_base(0x748) else {
+        return Vec::new();
+    };
+    let Some(runtime) = RUNTIME.get() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+
+    for recipe_row in param_rows(recipe_param) {
+        unsafe {
+            let Some(material_set_id) = read_i32(recipe_row + 0x08).filter(|&id| id >= 0) else {
+                continue;
+            };
+            let Some(material_row) = find_row(material_param, material_set_id as u32) else {
+                continue;
+            };
+            let used = (0..6).any(|slot| {
+                read_i32(material_row + slot * 4) == Some(material_id as i32)
+                    && read_u8(material_row + 0x28 + slot) == Some(4)
+            });
+            if !used {
+                continue;
+            }
+
+            let equip_type = read_u8(recipe_row + 0x17).unwrap_or(3);
+            let Some(output_id) = read_i32(recipe_row)
+                .filter(|&id| id >= 0)
+                .map(|id| id as u32)
+            else {
+                continue;
+            };
+            let categories: &[u32] = match equip_type {
+                0 => &[11, 310, 410],
+                1 => &[12, 313, 413],
+                2 => &[13, 316, 416],
+                4 => &[35, 322, 422],
+                _ => &[10, 319, 419],
+            };
+            if seen.insert((equip_type, output_id)) {
+                if let Some(name) = lookup_first(runtime, categories, output_id) {
+                    names.push(name);
+                    if names.len() == 4 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+fn param_base(param_offset: usize) -> Option<usize> {
+    let runtime = RUNTIME.get()?;
+    if runtime.solo_param_slot == 0 {
+        return None;
+    }
+    unsafe {
+        let repo = read_ptr(runtime.solo_param_slot)?;
+        let first = read_ptr(repo.checked_add(param_offset)?)?;
+        let second = read_ptr(first.checked_add(0x80)?)?;
+        read_ptr(second.checked_add(0x80)?)
+    }
+}
+
+fn param_row(param_offset: usize, row_id: u32) -> Option<usize> {
+    find_row(param_base(param_offset)?, row_id)
+}
+
+fn find_row(param: usize, row_id: u32) -> Option<usize> {
+    unsafe {
+        let table_end = read_i32(param.checked_add(0x30)?)?;
+        if !(0x40..=0x0400_0000).contains(&table_end) {
+            return None;
+        }
+        let row_count = (table_end as usize - 0x40) / 0x18;
+        let mut low = 0usize;
+        let mut high = row_count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let row = param.checked_add(0x40 + mid * 0x18)?;
+            match (read_i32(row)? as u32).cmp(&row_id) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => {
+                    let offset = read_i32(row + 0x08)?;
+                    return (0..=0x0800_0000)
+                        .contains(&offset)
+                        .then(|| param + offset as usize);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn param_rows(param: usize) -> Vec<usize> {
+    unsafe {
+        let Some(table_end) = read_i32(param + 0x30) else {
+            return Vec::new();
+        };
+        if !(0x40..=0x0400_0000).contains(&table_end) {
+            return Vec::new();
+        }
+        let count = (table_end as usize - 0x40) / 0x18;
+        (0..count)
+            .filter_map(|index| {
+                let entry = param + 0x40 + index * 0x18;
+                let offset = read_i32(entry + 0x08)?;
+                (0..=0x0800_0000)
+                    .contains(&offset)
+                    .then(|| param + offset as usize)
+            })
+            .collect()
+    }
+}
+
 pub fn lookup_item_text(
     category: u32,
     param_id: u32,
@@ -300,6 +595,19 @@ unsafe fn read_ptr(address: usize) -> Option<usize> {
 
 unsafe fn read_i32(address: usize) -> Option<i32> {
     plausible(address).then(|| (address as *const i32).read_unaligned())
+}
+
+unsafe fn read_u8(address: usize) -> Option<u8> {
+    plausible(address).then(|| (address as *const u8).read_unaligned())
+}
+
+unsafe fn read_u16(address: usize) -> Option<u16> {
+    plausible(address).then(|| (address as *const u16).read_unaligned())
+}
+
+unsafe fn read_f32(address: usize) -> Option<f32> {
+    let value = plausible(address).then(|| (address as *const f32).read_unaligned())?;
+    value.is_finite().then_some(value)
 }
 
 fn signature_matches(addr: usize, expected: &[u8]) -> bool {

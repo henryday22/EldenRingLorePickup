@@ -22,6 +22,7 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClientRect,
     GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, PeekMessageW, RegisterClassW,
@@ -31,10 +32,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const MIN_DISPLAY_TIME: Duration = Duration::from_secs(20);
-const MAX_DISPLAY_TIME: Duration = Duration::from_secs(32);
+const MIN_DISPLAY_TIME: Duration = Duration::from_secs(14);
+const MAX_DISPLAY_TIME: Duration = Duration::from_secs(24);
+const QUEUED_DISPLAY_TIME: Duration = Duration::from_secs(12);
 const FADE_IN: Duration = Duration::from_millis(240);
-const FADE_OUT: Duration = Duration::from_millis(900);
+const FADE_OUT: Duration = Duration::from_millis(1150);
+const VK_F8_KEY: i32 = 0x77;
 const PANEL_ALPHA: u8 = 176;
 const CONTENT_ALPHA: u8 = 255;
 // Black is transparent outside the card. The icon has its own dark (not black) tile, which
@@ -82,6 +85,7 @@ pub struct LoreEntry {
     pub name: String,
     pub description: String,
     pub icon_id: Option<u32>,
+    pub details: Vec<String>,
 }
 
 struct DisplayState {
@@ -106,9 +110,23 @@ impl DisplayState {
 
         if expired {
             self.current = self.pending.pop_front().map(|entry| {
-                let duration = display_time(&entry.description);
+                let duration = if self.pending.is_empty() {
+                    display_time(&entry.description)
+                } else {
+                    QUEUED_DISPLAY_TIME
+                };
                 (entry, now, duration)
             });
+        }
+    }
+
+    fn dismiss(&mut self, now: Instant) {
+        if let Some((_, shown_at, duration)) = self.current.as_mut() {
+            let fade_start = duration.saturating_sub(FADE_OUT);
+            let current_age = now.saturating_duration_since(*shown_at);
+            if current_age < fade_start {
+                *shown_at = now.checked_sub(fade_start).unwrap_or(now);
+            }
         }
     }
 
@@ -120,6 +138,8 @@ impl DisplayState {
                 shown_at: *shown_at,
                 age: now.saturating_duration_since(*shown_at),
                 duration: *duration,
+                pending: self.pending.iter().take(3).cloned().collect(),
+                queued: self.pending.len(),
             })
     }
 }
@@ -130,6 +150,8 @@ struct DisplaySnapshot {
     shown_at: Instant,
     age: Duration,
     duration: Duration,
+    pending: Vec<LoreEntry>,
+    queued: usize,
 }
 
 static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
@@ -146,6 +168,9 @@ pub fn enqueue(entry: LoreEntry) {
         state.pending.push_back(entry);
         if state.current.is_none() {
             state.advance(Instant::now());
+        } else if let Some((_, shown_at, duration)) = state.current.as_mut() {
+            let elapsed = Instant::now().saturating_duration_since(*shown_at);
+            *duration = (*duration).min(elapsed + QUEUED_DISPLAY_TIME);
         }
     }
 
@@ -248,6 +273,7 @@ fn overlay_thread() -> Result<(), String> {
         let mut shown = false;
         let mut painted_entry: Option<Instant> = None;
         let mut applied_alpha = 0u8;
+        let mut dismiss_down = false;
 
         loop {
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -256,10 +282,15 @@ fn overlay_thread() -> Result<(), String> {
             }
 
             let now = Instant::now();
+            let key_down = GetAsyncKeyState(VK_F8_KEY) < 0;
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
+                if key_down && !dismiss_down && shown {
+                    state.dismiss(now);
+                }
+                dismiss_down = key_down;
                 state.advance(now);
                 state.snapshot(now)
             } else {
@@ -270,7 +301,7 @@ fn overlay_thread() -> Result<(), String> {
                 let alignment_changed =
                     update_alignment(background, content, &mut placement, &mut shown)
                         .unwrap_or(false);
-                let fade = overlay_fade(snapshot.age, snapshot.duration);
+                let fade = overlay_fade(snapshot.age);
                 let foreground_alpha = (CONTENT_ALPHA as f32 * fade).round() as u8;
                 if foreground_alpha != applied_alpha {
                     let panel_alpha = (PANEL_ALPHA as f32 * fade).round() as u8;
@@ -292,7 +323,8 @@ fn overlay_thread() -> Result<(), String> {
                 // The pixels do not change during the hold. Repainting the full-screen layered
                 // window every 16 ms caused GDI to expose its transparent clear between drawing
                 // passes, which looked like the game was flickering through the card.
-                if painted_entry != Some(snapshot.shown_at) || alignment_changed {
+                let dissolving = dissolve_progress(snapshot.age, snapshot.duration) > 0.0;
+                if painted_entry != Some(snapshot.shown_at) || alignment_changed || dissolving {
                     InvalidateRect(background, null(), 0);
                     InvalidateRect(content, null(), 0);
                     painted_entry = Some(snapshot.shown_at);
@@ -316,13 +348,20 @@ fn display_time(description: &str) -> Duration {
     Duration::from_secs(seconds.clamp(MIN_DISPLAY_TIME.as_secs(), MAX_DISPLAY_TIME.as_secs()))
 }
 
-fn overlay_fade(age: Duration, duration: Duration) -> f32 {
+fn overlay_fade(age: Duration) -> f32 {
     if age < FADE_IN {
         age.as_secs_f32() / FADE_IN.as_secs_f32()
-    } else if duration.saturating_sub(age) < FADE_OUT {
-        duration.saturating_sub(age).as_secs_f32() / FADE_OUT.as_secs_f32()
     } else {
         1.0
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn dissolve_progress(age: Duration, duration: Duration) -> f32 {
+    if duration.saturating_sub(age) < FADE_OUT {
+        1.0 - duration.saturating_sub(age).as_secs_f32() / FADE_OUT.as_secs_f32()
+    } else {
+        0.0
     }
     .clamp(0.0, 1.0)
 }
@@ -559,27 +598,29 @@ unsafe fn draw_frame(hdc: HDC, client: &RECT, layer: PaintLayer) {
         .and_then(|state| state.snapshot(Instant::now()));
 
     if let Some(snapshot) = snapshot {
-        draw_card(hdc, client, &snapshot.entry, layer);
+        draw_card(hdc, client, &snapshot, layer);
     }
 }
 
-unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLayer) {
+unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: PaintLayer) {
+    let entry = &snapshot.entry;
     let width = client.right - client.left;
     let height = client.bottom - client.top;
     let scale = (height as f32 / 2160.0).clamp(0.58, 1.35);
     let px = |at_4k: f32| (at_4k * scale).round() as i32;
 
-    let panel_width = ((width as f32 * 0.285).round() as i32)
-        .clamp(px(900.0), px(1460.0))
+    let panel_width = ((width as f32 * 0.235).round() as i32)
+        .clamp(px(720.0), px(1040.0))
         .min(width - px(100.0));
     let margin_right = px(66.0);
     let pad_x = px(62.0);
     let pad_top = px(44.0);
-    let pad_bottom = px(52.0);
-    let icon_size = px(154.0).max(76);
-    let icon_gap = px(38.0);
-    let title_size = px(64.0).max(30);
-    let body_size = px(50.0).max(24);
+    let pad_bottom = px(62.0);
+    let icon_size = px(142.0).max(70);
+    let icon_gap = px(30.0);
+    let title_size = px(56.0).max(27);
+    let body_size = px(43.0).max(21);
+    let detail_size = px(33.0).max(16);
     let title_gap = px(25.0);
     let rule_gap = px(25.0);
     let text_width = panel_width - pad_x * 2;
@@ -617,6 +658,22 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         (DEFAULT_PITCH | FF_ROMAN).into(),
         FONT_FACE.as_ptr(),
     );
+    let detail_font = CreateFontW(
+        -detail_size,
+        0,
+        0,
+        0,
+        FW_SEMIBOLD as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.into(),
+        OUT_TT_PRECIS.into(),
+        CLIP_DEFAULT_PRECIS.into(),
+        CLEARTYPE_QUALITY.into(),
+        (DEFAULT_PITCH | FF_ROMAN).into(),
+        FONT_FACE.as_ptr(),
+    );
 
     SetBkMode(hdc, TRANSPARENT as i32);
 
@@ -637,10 +694,40 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         body_font
     };
     SelectObject(hdc, selected_body);
-    let body_height = measure_text(hdc, &entry.description, text_width).max(body_size + px(8.0));
+    let paragraphs = lore_paragraphs(&entry.description);
+    let paragraph_gap = px(24.0).max(10);
+    let body_height =
+        measure_paragraphs(hdc, &paragraphs, text_width, paragraph_gap).max(body_size + px(8.0));
 
-    let panel_height =
-        pad_top + title_height + title_gap + px(1.0) + rule_gap + body_height + pad_bottom;
+    let selected_detail = if detail_font.is_null() {
+        stock_font
+    } else {
+        detail_font
+    };
+    SelectObject(hdc, selected_detail);
+    let detail_gap = px(12.0).max(5);
+    let details_height = if entry.details.is_empty() {
+        0
+    } else {
+        px(36.0)
+            + entry
+                .details
+                .iter()
+                .map(|line| measure_text(hdc, line, text_width) + detail_gap)
+                .sum::<i32>()
+    };
+    let footer_height = px(42.0);
+
+    let natural_height = pad_top
+        + title_height
+        + title_gap
+        + px(1.0)
+        + rule_gap
+        + body_height
+        + details_height
+        + footer_height
+        + pad_bottom;
+    let panel_height = natural_height.max((panel_width as f32 * 1.34) as i32);
     let right = width - margin_right;
     // Elden Ring's pickup strip sits at the lower-right. End the lore card just above it.
     let bottom_anchor = (height as f32 * 0.755).round() as i32;
@@ -654,10 +741,36 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         bottom,
     };
 
+    let dissolve = dissolve_progress(snapshot.age, snapshot.duration);
+    let deck_count = snapshot.pending.len();
+
+    // Pending cards sit visibly behind the current one, like an ornate deck.
+    for depth in (1..=deck_count).rev() {
+        let offset_x = px(15.0) * depth as i32;
+        let offset_y = px(22.0) * depth as i32;
+        let rear = RECT {
+            left: panel.left - offset_x,
+            right: panel.right - offset_x,
+            top: panel.top - offset_y,
+            bottom: panel.bottom - offset_y,
+        };
+        if layer == PaintLayer::Background {
+            let brush = CreateSolidBrush(rgb(16, 15, 12));
+            FillRect(hdc, &rear, brush);
+            DeleteObject(brush);
+        } else {
+            draw_gilded_frame(hdc, &rear, px);
+        }
+    }
+
     if layer == PaintLayer::Background {
         // Only this window is alpha-reduced. The separate content window remains fully opaque.
         let panel_brush = CreateSolidBrush(rgb(19, 17, 14));
-        FillRect(hdc, &panel, panel_brush);
+        if dissolve <= 0.0 {
+            FillRect(hdc, &panel, panel_brush);
+        } else {
+            draw_dissolving_panel(hdc, &panel, panel_brush, dissolve, entry.raw_id, px);
+        }
         DeleteObject(panel_brush);
 
         SelectObject(hdc, old_font);
@@ -667,10 +780,16 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         if !body_font.is_null() {
             DeleteObject(body_font);
         }
+        if !detail_font.is_null() {
+            DeleteObject(detail_font);
+        }
         return;
     }
 
-    draw_gilded_frame(hdc, &panel, px);
+    let ink = (1.0 - dissolve).clamp(0.0, 1.0);
+    if ink > 0.05 {
+        draw_gilded_frame_tinted(hdc, &panel, px, ink);
+    }
 
     let text_left = left + pad_x;
     let text_right = right - pad_x;
@@ -682,7 +801,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         right: text_left + icon_size,
         bottom: y + icon_size,
     };
-    draw_icon_panel(hdc, &icon_rect, entry, px);
+    if ink > 0.12 {
+        draw_icon_panel(hdc, &icon_rect, entry, px);
+    }
 
     SelectObject(hdc, selected_title);
     draw_shadowed_text(
@@ -692,16 +813,19 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
         y + ((title_height - measure_text(hdc, &entry.name, title_width)) / 2).max(0),
         text_right,
         y + title_height,
-        rgb(230, 220, 194),
+        fade_colour(230, 220, 194, ink),
         px(2.0).max(1),
     );
     y += title_height + title_gap;
 
-    let old_pen = SelectObject(hdc, CreatePen(PS_SOLID, px(2.0).max(1), rgb(133, 105, 59)));
+    let old_pen = SelectObject(
+        hdc,
+        CreatePen(PS_SOLID, px(2.0).max(1), fade_colour(133, 105, 59, ink)),
+    );
     MoveToEx(hdc, text_left, y, null_mut());
     LineTo(hdc, text_right, y);
     let ornament = px(9.0).max(4);
-    let ornament_brush = CreateSolidBrush(rgb(133, 105, 59));
+    let ornament_brush = CreateSolidBrush(fade_colour(133, 105, 59, ink));
     let old_brush = SelectObject(hdc, ornament_brush);
     Ellipse(
         hdc,
@@ -724,16 +848,63 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
     y += rule_gap;
 
     SelectObject(hdc, selected_body);
-    draw_shadowed_text(
+    y = draw_paragraphs(
         hdc,
-        &entry.description,
+        &paragraphs,
         text_left,
         y,
         text_right,
-        y + body_height,
-        rgb(224, 221, 211),
+        paragraph_gap,
+        fade_colour(224, 221, 211, ink),
         px(2.0).max(1),
     );
+
+    if !entry.details.is_empty() {
+        y += px(23.0);
+        let separator = CreatePen(PS_SOLID, px(1.0).max(1), fade_colour(92, 75, 47, ink));
+        let previous = SelectObject(hdc, separator);
+        MoveToEx(hdc, text_left, y, null_mut());
+        LineTo(hdc, text_right, y);
+        SelectObject(hdc, previous);
+        DeleteObject(separator);
+        y += px(20.0);
+        SelectObject(hdc, selected_detail);
+        for line in &entry.details {
+            let line_height = measure_text(hdc, line, text_width).max(detail_size + px(3.0));
+            draw_shadowed_text(
+                hdc,
+                line,
+                text_left,
+                y,
+                text_right,
+                y + line_height,
+                fade_colour(198, 178, 129, ink),
+                1,
+            );
+            y += line_height + detail_gap;
+        }
+    }
+
+    SelectObject(hdc, selected_detail);
+    let footer = if snapshot.queued > 0 {
+        format!("F8  NEXT     {} IN DECK", snapshot.queued)
+    } else {
+        "F8  DISMISS".to_string()
+    };
+    draw_shadowed_text(
+        hdc,
+        &footer,
+        text_left,
+        panel.bottom - pad_bottom,
+        text_right,
+        panel.bottom - px(20.0),
+        fade_colour(164, 137, 82, ink),
+        1,
+    );
+
+    if dissolve > 0.0 {
+        draw_rune_dust(hdc, &panel, dissolve, entry.raw_id, px);
+    }
 
     SelectObject(hdc, old_font);
     if !title_font.is_null() {
@@ -741,6 +912,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, entry: &LoreEntry, layer: PaintLaye
     }
     if !body_font.is_null() {
         DeleteObject(body_font);
+    }
+    if !detail_font.is_null() {
+        DeleteObject(detail_font);
     }
 }
 
@@ -783,6 +957,144 @@ unsafe fn draw_gilded_frame(hdc: HDC, panel: &RECT, px: impl Fn(f32) -> i32 + Co
     DeleteObject(bright);
 }
 
+unsafe fn draw_gilded_frame_tinted(
+    hdc: HDC,
+    panel: &RECT,
+    px: impl Fn(f32) -> i32 + Copy,
+    opacity: f32,
+) {
+    let gold = |r: u8, g: u8, b: u8| fade_colour(r, g, b, opacity);
+    let outer = CreatePen(PS_SOLID, px(3.0).max(1), gold(139, 108, 57));
+    let old_pen = SelectObject(hdc, outer);
+    let old_brush = SelectObject(hdc, GetStockObject(5));
+    Rectangle(hdc, panel.left, panel.top, panel.right, panel.bottom);
+
+    let inset = px(9.0).max(4);
+    let inner = CreatePen(PS_SOLID, px(1.0).max(1), gold(201, 170, 102));
+    SelectObject(hdc, inner);
+    Rectangle(
+        hdc,
+        panel.left + inset,
+        panel.top + inset,
+        panel.right - inset,
+        panel.bottom - inset,
+    );
+
+    let corner = px(62.0).max(28);
+    let bright = CreatePen(PS_SOLID, px(3.0).max(1), gold(221, 190, 116));
+    SelectObject(hdc, bright);
+    for &(x, y, dx, dy) in &[
+        (panel.left, panel.top, 1, 1),
+        (panel.right, panel.top, -1, 1),
+        (panel.left, panel.bottom, 1, -1),
+        (panel.right, panel.bottom, -1, -1),
+    ] {
+        MoveToEx(hdc, x, y + dy * corner, null_mut());
+        LineTo(hdc, x, y);
+        LineTo(hdc, x + dx * corner, y);
+    }
+
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(outer);
+    DeleteObject(inner);
+    DeleteObject(bright);
+}
+
+unsafe fn draw_dissolving_panel(
+    hdc: HDC,
+    panel: &RECT,
+    brush: *mut std::ffi::c_void,
+    progress: f32,
+    seed: u32,
+    px: impl Fn(f32) -> i32 + Copy,
+) {
+    let tile = px(22.0).max(8);
+    let mut y = panel.top;
+    let mut row = 0u32;
+    while y < panel.bottom {
+        let mut x = panel.left;
+        let mut column = 0u32;
+        while x < panel.right {
+            let noise = hash_unit(seed ^ row.wrapping_mul(0x9E37) ^ column.wrapping_mul(0x85EB));
+            let right_bias =
+                ((x - panel.left) as f32 / (panel.right - panel.left).max(1) as f32) * 0.22;
+            if noise * 0.78 + right_bias > progress {
+                let tile_rect = RECT {
+                    left: x,
+                    top: y,
+                    right: (x + tile + 1).min(panel.right),
+                    bottom: (y + tile + 1).min(panel.bottom),
+                };
+                FillRect(hdc, &tile_rect, brush);
+            }
+            x += tile;
+            column += 1;
+        }
+        y += tile;
+        row += 1;
+    }
+}
+
+unsafe fn draw_rune_dust(
+    hdc: HDC,
+    panel: &RECT,
+    progress: f32,
+    seed: u32,
+    px: impl Fn(f32) -> i32 + Copy,
+) {
+    let colour = fade_colour(231, 190, 100, (1.0 - progress * 0.55).max(0.25));
+    let pen = CreatePen(PS_SOLID, px(2.0).max(1), colour);
+    let brush = CreateSolidBrush(colour);
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, brush);
+    let width = (panel.right - panel.left).max(1) as f32;
+    let height = (panel.bottom - panel.top).max(1) as f32;
+
+    for index in 0..64u32 {
+        let born = hash_unit(seed ^ index.wrapping_mul(0xA511_E9B3));
+        if born > progress || progress - born > 0.42 {
+            continue;
+        }
+        let life = ((progress - born) / 0.42).clamp(0.0, 1.0);
+        let x0 = panel.left as f32 + hash_unit(seed ^ index.wrapping_mul(0x63D8_3595)) * width;
+        let y0 = panel.top as f32 + hash_unit(seed ^ index.wrapping_mul(0xC2B2_AE35)) * height;
+        let x = (x0 + life * px(92.0) as f32).round() as i32;
+        let y = (y0 - life * px(54.0) as f32).round() as i32;
+        let size = px(4.0 + hash_unit(index ^ seed) * 8.0).max(2);
+        Ellipse(hdc, x - size, y - size, x + size, y + size);
+        if index % 5 == 0 {
+            MoveToEx(hdc, x - size * 2, y, null_mut());
+            LineTo(hdc, x + size * 2, y);
+            MoveToEx(hdc, x, y - size * 2, null_mut());
+            LineTo(hdc, x, y + size * 2);
+        }
+    }
+
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+fn hash_unit(mut value: u32) -> f32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    value ^= value >> 16;
+    (value as f32) / (u32::MAX as f32)
+}
+
+fn fade_colour(r: u8, g: u8, b: u8, opacity: f32) -> u32 {
+    let opacity = opacity.clamp(0.0, 1.0);
+    rgb(
+        (r as f32 * opacity).round() as u8,
+        (g as f32 * opacity).round() as u8,
+        (b as f32 * opacity).round() as u8,
+    )
+}
+
 unsafe fn draw_icon_panel(
     hdc: HDC,
     rect: &RECT,
@@ -817,8 +1129,7 @@ unsafe fn draw_icon_panel(
 
     let drawn = entry
         .icon_id
-        .map(crate::icons::icon_path)
-        .filter(|path| path.is_file())
+        .and_then(crate::icons::icon_path)
         .map(|path| draw_png(hdc, rect, &path))
         .unwrap_or(false);
 
@@ -918,6 +1229,61 @@ unsafe fn measure_text(hdc: HDC, text: &str, width: i32) -> i32 {
         DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
     );
     rect.bottom - rect.top
+}
+
+fn lore_paragraphs(text: &str) -> Vec<String> {
+    let clean = text.replace('\r', "");
+    let paragraphs = clean
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if paragraphs.is_empty() {
+        vec![text.trim().to_string()]
+    } else {
+        paragraphs
+    }
+}
+
+unsafe fn measure_paragraphs(hdc: HDC, paragraphs: &[String], width: i32, gap: i32) -> i32 {
+    paragraphs
+        .iter()
+        .enumerate()
+        .map(|(index, paragraph)| {
+            measure_text(hdc, paragraph, width) + if index + 1 < paragraphs.len() { gap } else { 0 }
+        })
+        .sum()
+}
+
+unsafe fn draw_paragraphs(
+    hdc: HDC,
+    paragraphs: &[String],
+    left: i32,
+    mut top: i32,
+    right: i32,
+    gap: i32,
+    colour: u32,
+    shadow_offset: i32,
+) -> i32 {
+    for (index, paragraph) in paragraphs.iter().enumerate() {
+        let height = measure_text(hdc, paragraph, right - left);
+        draw_shadowed_text(
+            hdc,
+            paragraph,
+            left,
+            top,
+            right,
+            top + height,
+            colour,
+            shadow_offset,
+        );
+        top += height;
+        if index + 1 < paragraphs.len() {
+            top += gap;
+        }
+    }
+    top
 }
 
 unsafe fn draw_shadowed_text(

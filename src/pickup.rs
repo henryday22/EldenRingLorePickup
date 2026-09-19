@@ -103,7 +103,7 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         return;
     }
 
-    let (name, _info, caption) = runtime::lookup_item_text(category, param_id);
+    let (name, info, caption) = runtime::lookup_item_text(category, param_id);
 
     let Some(name) = name else {
         runtime::log_line(&format!(
@@ -112,16 +112,24 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         return;
     };
 
-    // Only the caption is lore. The short "info" string is the mechanical summary and is
-    // deliberately excluded from the card.
     let description = caption.filter(|s| !s.trim().is_empty()).unwrap_or_default();
 
     if description.trim().is_empty() {
         return;
     }
 
-    let icon_id = runtime::lookup_icon_id(category, param_id)
-        .or_else(|| crate::icons::fallback_icon_id(category, param_id));
+    // Some builds return zero from the live row even though a valid static mapping exists.
+    // Never let that sentinel suppress the bundled icon, and verify the PNG before accepting it.
+    let live_icon = runtime::lookup_icon_id(category, param_id).filter(|&id| id != 0);
+    let fallback_icon = crate::icons::fallback_icon_id(category, param_id).filter(|&id| id != 0);
+    let icon_id = live_icon
+        .filter(|&id| crate::icons::icon_path(id).is_some())
+        .or_else(|| fallback_icon.filter(|&id| crate::icons::icon_path(id).is_some()));
+    let details = runtime::lookup_item_details(category, param_id, info.as_deref());
+
+    runtime::log_line(&format!(
+        "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
+    ));
 
     overlay::enqueue(overlay::LoreEntry {
         raw_id,
@@ -130,5 +138,6 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         name,
         description,
         icon_id,
+        details,
     });
 }

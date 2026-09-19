@@ -1,6 +1,6 @@
 [package]
 name = "elden-ring-lore-pickup"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Show Elden Ring item lore automatically when an item is acquired."
 repository = "https://github.com/henryday22/EldenRingLorePickup"
@@ -17,6 +17,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_GdiPlus",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

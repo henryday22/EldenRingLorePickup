@@ -50,29 +50,31 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.4.0.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.5.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.4.0
-          path: EldenRingLorePickup-v0.4.0.zip
+          name: EldenRingLorePickup-v0.5.0
+          path: EldenRingLorePickup-v0.5.0.zip
 
-      - name: Publish v0.4.0 release
+      - name: Publish v0.5.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.4.0
+          tag_name: v0.5.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.4.0 — Translucent Gilded Card
+          name: LorePickup v0.5.0 — Stacked Lore Deck
           body: |
-            Adds a translucent lore panel while keeping the text fully opaque, introduces a restrained gilded frame, and displays the acquired item's inventory icon.
+            Reworks the overlay into a narrower, taller ornate card with consistent paragraph spacing. Multiple pickups now appear as a visible deck, F8 dismisses the front card, and outgoing cards dissolve into gold rune-like dust.
 
-            The earlier double-buffering fix remains in place to prevent the game from flickering through the card. No DirectX hook is used.
+            Icon resolution now rejects invalid zero IDs and verifies the supplied PNG before falling back to the bundled mapping. Cards also show compact live-param details: weapon requirements, affinity, base attack and Ash of War; armour/talisman load guidance; and crafting outputs for ingredients.
+
+            The double-buffered, split-translucency renderer remains in place to prevent the game from flickering through the card. No DirectX hook is used.
 
             Extract the DLL and the complete `EldenRingLorePickup-icons` folder into the same ModEngine3 `natives` directory. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup.dll`.
-          files: EldenRingLorePickup-v0.4.0.zip
+          files: EldenRingLorePickup-v0.5.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

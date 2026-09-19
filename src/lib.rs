@@ -47,7 +47,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.4 bootstrap: translucent layered lore card with item icons; no DirectX hooks.",
+            "LorePickup v0.5 bootstrap: stacked ornate lore cards with item details; no DirectX hooks.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
