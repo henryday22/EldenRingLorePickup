@@ -103,7 +103,7 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         return;
     }
 
-    let (name, info, caption) = runtime::lookup_item_text(category, param_id);
+    let (name, _info, caption) = runtime::lookup_item_text(category, param_id);
 
     let Some(name) = name else {
         runtime::log_line(&format!(
@@ -112,33 +112,23 @@ fn process_pickup(raw_id: u32, quantity: i32) {
         return;
     };
 
-    let description = caption
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| info.clone())
-        .unwrap_or_default();
+    // Only the caption is lore. The short "info" string is the mechanical summary and is
+    // deliberately excluded from the card.
+    let description = caption.filter(|s| !s.trim().is_empty()).unwrap_or_default();
 
     if description.trim().is_empty() {
         return;
     }
 
+    let icon_id = runtime::lookup_icon_id(category, param_id)
+        .or_else(|| crate::icons::fallback_icon_id(category, param_id));
+
     overlay::enqueue(overlay::LoreEntry {
         raw_id,
         param_id,
         quantity,
-        kind: kind_name(category),
         name,
-        info,
         description,
+        icon_id,
     });
-}
-
-fn kind_name(category: u32) -> &'static str {
-    match category {
-        0x0000_0000 => "WEAPON",
-        0x1000_0000 => "ARMOUR",
-        0x2000_0000 => "TALISMAN",
-        0x4000_0000 => "ITEM",
-        0x8000_0000 => "ASH OF WAR",
-        _ => "ITEM",
-    }
 }

@@ -37,3 +37,15 @@ Used as the DirectX 12 / Dear ImGui hook layer. See that project's license for i
 ## FMG category mapping
 
 FMG IDs were cross-checked against established Elden Ring tooling including Soulstruct / Smithbox / Erd-Tools mappings. LorePickup reads the game's own runtime strings; no game text is redistributed in this repository.
+
+## Smithbox / Erd-Tools parameter references
+
+Repositories: https://github.com/vawser/Smithbox and
+https://github.com/Nordgaren/Elden-Ring-Debug-Tool
+
+Their public parameter definitions and runtime pointer patterns were used to identify the five
+`iconId` fields read by LorePickup. Smithbox is MIT licensed. Erd-Tools is GPL-3.0 licensed and was
+used as a reverse-engineering reference; no Erd-Tools source or binary code is included.
+
+The source repository contains only numeric item-to-icon fallback mappings. Game artwork is not
+committed to this source tree.

@@ -1,19 +1,40 @@
 #![cfg(windows)]
 
+mod icons;
 mod overlay;
 mod pickup;
 mod runtime;
 
 use std::ffi::c_void;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
+static MODULE_HANDLE: AtomicIsize = AtomicIsize::new(0);
+
+pub fn module_dir() -> PathBuf {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+
+    let module = MODULE_HANDLE.load(Ordering::Relaxed) as *mut c_void;
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    }
+    buffer.truncate(length as usize);
+    PathBuf::from(String::from_utf16_lossy(&buffer))
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 #[no_mangle]
 pub unsafe extern "system" fn DllMain(
-    _hmodule: HINSTANCE,
+    hmodule: HINSTANCE,
     reason: u32,
     _reserved: *mut c_void,
 ) -> bool {
@@ -21,9 +42,13 @@ pub unsafe extern "system" fn DllMain(
         return true;
     }
 
+    MODULE_HANDLE.store(hmodule.0 as isize, Ordering::Relaxed);
+
     thread::spawn(move || {
         runtime::init_log();
-        runtime::log_line("LorePickup v0.2 bootstrap: no DirectX overlay hooks.");
+        runtime::log_line(
+            "LorePickup v0.4 bootstrap: translucent layered lore card with item icons; no DirectX hooks.",
+        );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
             Ok(found) => Some(found),
