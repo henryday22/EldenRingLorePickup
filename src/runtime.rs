@@ -59,14 +59,9 @@ const CANDIDATES: &[Candidate] = &[
 type SearchFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> *const u16;
 
 pub fn init_log() {
-    let path = hudhook::util::get_dll_path().map(|mut p| {
-        p.set_extension("log");
-        p
-    });
-
-    let Some(path) = path else {
-        return;
-    };
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("EldenRingLorePickup.log");
 
     if let Ok(file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = LOG.set(Mutex::new(file));
