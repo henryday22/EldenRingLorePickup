@@ -113,9 +113,11 @@ pub fn player_inventory() -> Option<usize> {
     unsafe {
         let game_data_man = read_ptr(runtime.game_data_man_slot)?;
         let player_game_data = read_ptr(game_data_man.checked_add(0x08)?)?;
-        player_game_data
-            .checked_add(0x5D0)
-            .filter(|&ptr| plausible(ptr))
+        // PlayerGameData stores a pointer to EquipInventoryData at +0x5D0.  The previous
+        // implementation returned the address of this field instead of following it, which made
+        // every inventory list look corrupt and forced the overlay onto its unreliable visual
+        // fallback.
+        read_ptr(player_game_data.checked_add(0x5D0)?)
     }
 }
 

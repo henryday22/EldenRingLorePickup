@@ -79,8 +79,8 @@ unsafe extern "C" fn add_item_detour(
             .max(1)
     };
 
-    // Elden Ring's own inventory entry is the source of truth. In particular, its IsNew flag is
-    // persistent game state; the short right-side pickup log is not a first-acquisition signal.
+    // Elden Ring's own save-backed inventory is the source of truth.  Capture the item before and
+    // after the game handles the acquisition so repeated stack pickups do not create lore cards.
     let inventory_base = runtime::player_inventory();
     let before = inventory_base
         .map(|base| unsafe { inventory_state(base, raw_id) })
@@ -94,18 +94,18 @@ unsafe extern "C" fn add_item_detour(
     let after = inventory_base
         .map(|base| unsafe { inventory_state(base, raw_id) })
         .unwrap_or_default();
-    // InsertItem creates the inventory row before the acquisition UI finishes deciding whether
-    // to present its NEW dialog. The row's isNew field can therefore still be false here. Treat a
-    // genuinely new row as a candidate, then let the overlay confirm the actual NEW dialog.
-    let likely_new = before.readable && after.readable && !before.exists && after.exists;
-    let uncertain = !before.readable || !after.readable;
+    // A newly-created row is the transition that drives the game's first-acquisition panel.
+    // Do not admit an IsNew-only transition: that flag is also used by the inventory UI and may
+    // be reset when the player inspects an item, so using it alone could re-admit repeat pickups.
+    let new_row = before.readable && after.readable && !before.exists && after.exists;
+    let confirmed_new = new_row;
 
     runtime::log_line(&format!(
-        "LorePickup: acquisition candidate raw={raw_id:#x}, inventory={inventory_base:?}, before={before:?}, after={after:?}, likely_new={likely_new}, uncertain={uncertain}."
+        "LorePickup: acquisition raw={raw_id:#x}, inventory={inventory_base:?}, before={before:?}, after={after:?}, new_row={new_row}, confirmed_new={confirmed_new}."
     ));
 
-    if likely_new || uncertain {
-        let _ = std::panic::catch_unwind(|| process_pickup(raw_id, quantity, likely_new));
+    if confirmed_new {
+        let _ = std::panic::catch_unwind(|| process_pickup(raw_id, quantity));
     }
 
     ret
@@ -116,10 +116,8 @@ unsafe fn inventory_state(base: usize, raw_id: u32) -> InventoryState {
         return InventoryState::default();
     }
 
-    let mut state = InventoryState {
-        readable: true,
-        ..InventoryState::default()
-    };
+    let mut state = InventoryState::default();
+    let mut valid_lists = 0usize;
 
     for list_offset in INVENTORY_LIST_OFFSETS {
         let list = base + list_offset;
@@ -128,14 +126,18 @@ unsafe fn inventory_state(base: usize, raw_id: u32) -> InventoryState {
             ((list + LIST_ENTRY_COUNT_OFFSET) as *const u32).read_unaligned() as usize;
         let entries = ((list + LIST_POINTER_OFFSET) as *const usize).read_unaligned();
 
-        if capacity == 0 || entry_count == 0 {
+        if capacity == 0 && entry_count == 0 {
+            valid_lists += 1;
             continue;
         }
         if capacity > MAX_INVENTORY_CAPACITY
             || entry_count > capacity
-            || !plausible_address(entries)
+            || (capacity > 0 && !plausible_address(entries))
         {
-            state.readable = false;
+            continue;
+        }
+        valid_lists += 1;
+        if entry_count == 0 {
             continue;
         }
 
@@ -158,6 +160,7 @@ unsafe fn inventory_state(base: usize, raw_id: u32) -> InventoryState {
         }
     }
 
+    state.readable = valid_lists > 0;
     state
 }
 
@@ -165,7 +168,7 @@ fn plausible_address(address: usize) -> bool {
     (0x1_0000..=0x0000_7FFF_FFFF_FFFF).contains(&address)
 }
 
-fn process_pickup(raw_id: u32, quantity: i32, likely_new: bool) {
+fn process_pickup(raw_id: u32, quantity: i32) {
     if raw_id == 0 {
         return;
     }
@@ -208,16 +211,13 @@ fn process_pickup(raw_id: u32, quantity: i32, likely_new: bool) {
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
     ));
 
-    overlay::stage(
-        overlay::LoreEntry {
-            raw_id,
-            param_id,
-            quantity,
-            name,
-            description,
-            icon_id,
-            details,
-        },
-        likely_new,
-    );
+    overlay::stage(overlay::LoreEntry {
+        raw_id,
+        param_id,
+        quantity,
+        name,
+        description,
+        icon_id,
+        details,
+    });
 }

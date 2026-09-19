@@ -51,33 +51,33 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.2.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.6.3.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.6.2
-          path: EldenRingLorePickup-v0.6.2.zip
+          name: EldenRingLorePickup-v0.6.3
+          path: EldenRingLorePickup-v0.6.3.zip
 
-      - name: Publish v0.6.2 release
+      - name: Publish v0.6.3 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.2
+          tag_name: v0.6.3
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.6.2 — Reliable NEW-Dialog Confirmation
+          name: LorePickup v0.6.3 — Correct Save-Backed New-Item Detection
           body: |
-            Corrective release for v0.6.1's missing cards. The game can set the inventory entry's `isNew` bit after AddItem returns, so v0.6.1 rejected valid first acquisitions too early. v0.6.2 stages plausible new entries from the inventory comparison and confirms the actual large bottom-centre `NEW / OK` dialog before opening the card.
+            Corrective release for v0.6.2's missing cards. The supplied log proved that the DLL loaded and staged Radahn's Great Rune, Ash of War: Golden Slam and Icon Shield, but the live GDI capture could not see the HDR game surface and every candidate expired.
 
-            Confirmation now uses the dialog's three long horizontal edges rather than loose colour counts. It passes both supplied screenshots containing the full acquisition dialog and rejects the supplied ordinary right-side pickup notification screenshot. The dialog only opens the card; it does not control its lifetime.
+            The log also exposed the underlying inventory bug: `PlayerGameData + 0x5D0` contains a pointer to `EquipInventoryData`, while v0.6.1/v0.6.2 treated that field's address as the inventory itself. v0.6.3 follows the pointer correctly and compares the game's save-backed inventory before and after AddItem. A card is admitted only for an absent-to-present row. The inventory UI's separate `isNew` flag is logged but is not trusted by itself, so repeat stack pickups are rejected without using screen capture.
 
             Cards remain readable for up to 30 seconds and dismiss on a fresh controller Y press after the pickup button has been released. Multiple new items form a visible deck and advance in order. The presentation now uses a lighter hand-aged vellum surface with dark sepia ink, consistent paragraph spacing and a smooth fade without the coarse particle effect.
 
             The full icon bundle is included. Cards retain live weapon requirements, affinity, base attack and Ash of War, armour/talisman guidance and ingredient recipe outputs. Whetblades now explain exactly which affinities they unlock and which stats those affinities favour, including Poison/Blood/Occult guidance for the Black Whetblade.
 
-            Extract the DLL, `EldenRingLorePickup-card.png`, and the complete `EldenRingLorePickup-icons` folder into the same ModEngine3 `natives` directory. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup.dll`.
-          files: EldenRingLorePickup-v0.6.2.zip
+            Extract the DLL, `EldenRingLorePickup-card.png`, and the complete `EldenRingLorePickup-icons` folder into `profiles/natives/EldenRingLorePickup/`. The `.me3` profile does not need to change if it already points to `natives/EldenRingLorePickup/EldenRingLorePickup.dll`.
+          files: EldenRingLorePickup-v0.6.3.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build
