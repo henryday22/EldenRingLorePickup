@@ -838,14 +838,15 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     draw_icon_panel(hdc, &icon_rect, entry, px);
 
     let header_left = icon_rect.right + icon_gap;
+    let item_lore_label = if entry.quantity > 1 {
+        format!("ITEM LORE  •  ×{}", entry.quantity)
+    } else {
+        "ITEM LORE".to_string()
+    };
     SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
     draw_text_coloured(
         hdc,
-        if entry.quantity > 1 {
-            &format!("ITEM LORE  •  ×{}", entry.quantity)
-        } else {
-            "ITEM LORE"
-        },
+        &item_lore_label,
         header_left,
         y,
         text_right,
