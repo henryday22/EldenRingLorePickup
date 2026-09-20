@@ -73,3 +73,11 @@ commit d0f41fd44020c77f2c2809800e3a965e0353f656:
 Repository: https://github.com/Banon-Labs/er-mods-rs
 
 Only numerical addresses were used; no implementation code from that project was copied.
+
+## v0.8.2 presentation metadata
+
+The HUD-state probe and its version-specific address reads were removed after the user's live
+v0.8.1 log showed Hud(3) throughout item panels. The two flag-byte interpretations in
+`src/presentation.rs` are inferred from user-supplied logs and screenshots (Kukri, Exile Gauntlets,
+Stalwart Horn Charm and the three Cracked Tears). They are not attributed to the older
+Grand Archives ItemPopup script, which labelled the metadata word differently.

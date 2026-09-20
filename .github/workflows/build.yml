@@ -21,7 +21,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Test frontend probe and pickup queue
+      - name: Test presentation metadata and pickup queue
         run: cargo test --target x86_64-pc-windows-msvc
 
       - name: Build release DLL
@@ -53,32 +53,34 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.8.1.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.8.2.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.8.1
-          path: EldenRingLorePickup-v0.8.1.zip
+          name: EldenRingLorePickup-v0.8.2
+          path: EldenRingLorePickup-v0.8.2.zip
 
-      - name: Publish v0.8.1 release
+      - name: Publish v0.8.2 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.8.1
+          tag_name: v0.8.2
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.8.1 — Correct 1.17 frontend address
+          name: LorePickup v0.8.2 — Per-item presentation flags
           prerelease: true
           body: |
-            Fixes the confirmed v0.8.0 address bug: the 1.17 runtime was using the 1.16 CSFeMan singleton fallback. Kukri and Exile Gauntlets were captured correctly, then discarded by the unreadable popup probe.
+            Removes the HUD-state gate entirely. The v0.8.1 log proved Hud(3) remains active while Y/OK item panels are visible.
 
-            Uses the version-specific frontend address, verifies the CSFeManImp vtable before reading its HUD state, and safely reads memory through Windows. Logs now distinguish an unavailable probe from a closed popup instead of calling every missed candidate a routine pickup.
+            Classifies each pickup using the two presentation bytes observed in the supplied logs: the NEW-item flag or the forced-panel flag. This covers existing Kukri, NEW Exile Gauntlets, Stalwart Horn Charm and all three Cracked Tears; ordinary unflagged pickups are filtered separately, even while cards are queued. Dirty padding bytes do not count as a flag.
 
-            Validation: automated memory-probe and queue tests and a Windows release build. This is a prerelease pending an in-game check; the general HUD-state gate is still used. No claim is made that every item panel and dismissal case is already verified.
+            Cards queue immediately and remain until Y. The old 1.5-second candidate expiration and 90-second reading limit are gone. Three qualifying pickups create an ordered three-card deck. Holding Y cannot skip the next card.
 
-            Close Elden Ring, replace EldenRingLorePickup.dll, retain the icon folder and existing .me3 entry, and relaunch. The modern UI is unchanged. Check one Y/OK item panel and one ordinary small-log pickup; if either behaves incorrectly, the new log contains the probe state needed to distinguish the remaining cause.
-          files: EldenRingLorePickup-v0.8.1.zip
+            Validation: automated tests against recorded metadata values and queue/input scenarios, plus a Windows build. This is a prerelease: the flag interpretation is inferred from the supplied traces and has not been verified in-game after this change. Dismissal observes controller Y, not the actual panel-close event; keyboard/remapped input and closure by death/loading are not synchronized.
+
+            Close the game, replace EldenRingLorePickup.dll, keep the icons and .me3 entry, then relaunch. The modern appearance and information rows are unchanged.
+          files: EldenRingLorePickup-v0.8.2.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

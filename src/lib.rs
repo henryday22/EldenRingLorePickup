@@ -3,7 +3,7 @@
 mod icons;
 mod overlay;
 mod pickup;
-mod panel_probe;
+mod presentation;
 mod runtime;
 
 use std::ffi::c_void;
@@ -48,7 +48,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.8.1 bootstrap: corrected 1.17 frontend address with validated panel reads; no DirectX hooks.",
+            "LorePickup v0.8.2 bootstrap: per-item presentation flags and Y-dismissed deck; no DirectX hooks.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
@@ -89,7 +89,7 @@ pub unsafe extern "system" fn DllMain(
         }
 
         runtime::log_line(
-            "LorePickup: item candidate hook installed; awaiting the game's blocking popup state.",
+            "LorePickup: item hook installed; filtering per-item presentation metadata.",
         );
     });
 

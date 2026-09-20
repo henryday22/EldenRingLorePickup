@@ -24,8 +24,6 @@ pub struct GameRuntime {
     pub fmg_repo_rva: usize,
     pub fmg_search_rva: usize,
     pub solo_param_slot: usize,
-    pub cs_fe_man_slot: usize,
-    pub cs_fe_man_vtable: usize,
     pub label: &'static str,
 }
 
@@ -34,8 +32,6 @@ struct Candidate {
     add_item_rva: usize,
     fmg_repo_rva: usize,
     fmg_search_rva: usize,
-    cs_fe_man_rva: usize,
-    cs_fe_man_vtable_rva: usize,
     label: &'static str,
 }
 
@@ -44,24 +40,18 @@ const CANDIDATES: &[Candidate] = &[
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FC40,
-        cs_fe_man_rva: 0x03D6_F8F0,
-        cs_fe_man_vtable_rva: 0x02AA_0A08,
         label: "ER 2.7.1.0 / 1.17-era",
     },
     Candidate {
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FBD0,
-        cs_fe_man_rva: 0x03D6_F8F0,
-        cs_fe_man_vtable_rva: 0x02AA_0A08,
         label: "ER 2.7.0.0 / Tarnished Edition",
     },
     Candidate {
         add_item_rva: 0x0056_05B0,
         fmg_repo_rva: 0x03D7_D4F8,
         fmg_search_rva: 0x0266_D3C0,
-        cs_fe_man_rva: 0x03D6_B880,
-        cs_fe_man_vtable_rva: 0x02A9_D988,
         label: "ER 2.6.2.0",
     },
 ];
@@ -104,71 +94,20 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
                 fmg_repo_rva: candidate.fmg_repo_rva,
                 fmg_search_rva: candidate.fmg_search_rva,
                 solo_param_slot: find_solo_param_slot(base).unwrap_or(0),
-                // These are paired with the executable signatures above. The old broad scan
-                // silently fell back to a 1.16 singleton address on 1.17.
-                cs_fe_man_slot: base + candidate.cs_fe_man_rva,
-                cs_fe_man_vtable: base + candidate.cs_fe_man_vtable_rva,
                 label: candidate.label,
             };
             log_line(&format!(
-                "LorePickup: matched {} (base={:#x}, item_popup={:#x}, params={:#x}, fe_man={:#x}).",
+                "LorePickup: matched {} (base={:#x}, item_popup={:#x}, params={:#x}).",
                 found.label,
                 found.base,
                 found.item_popup_rva,
-                found.solo_param_slot,
-                found.cs_fe_man_slot
+                found.solo_param_slot
             ));
             return Ok(found);
         }
     }
 
     Err("known item/message signatures not present".to_string())
-}
-
-/// Read the frontend HUD state only from a version-matched CSFeManImp object.
-/// A failed read is UNKNOWN, not evidence that a pickup was routine.
-/// The association between PopupMenu and item panels still needs an in-game check.
-pub fn item_panel_visible() -> Option<bool> {
-    let runtime = RUNTIME.get()?;
-    let probe = crate::panel_probe::probe(
-        runtime.cs_fe_man_slot,
-        runtime.cs_fe_man_vtable,
-        safe_read_usize,
-        safe_read_byte,
-    );
-    static LAST_PROBE: Mutex<Option<crate::panel_probe::PanelProbe>> = Mutex::new(None);
-    if let Ok(mut last) = LAST_PROBE.lock() {
-        if last.as_ref() != Some(&probe) {
-            log_line(&format!("LorePickup: panel probe {probe:?}."));
-            *last = Some(probe);
-        }
-    }
-    probe.visible()
-}
-
-// Windows performs the read so a singleton being destroyed cannot cause an access violation
-// on the overlay thread. Do not dereference an address simply because it looks like a pointer.
-fn safe_read<const N: usize>(address: usize) -> Option<[u8; N]> {
-    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    if !plausible(address) {
-        return None;
-    }
-    let mut value = [0u8; N];
-    let mut read = 0usize;
-    let ok = unsafe {
-        ReadProcessMemory(GetCurrentProcess(), address as *const c_void,
-            value.as_mut_ptr().cast(), N, &mut read)
-    };
-    (ok != 0 && read == N).then_some(value)
-}
-
-fn safe_read_usize(address: usize) -> Option<usize> {
-    safe_read(address).map(usize::from_ne_bytes)
-}
-
-fn safe_read_byte(address: usize) -> Option<u8> {
-    safe_read::<1>(address).map(|value| value[0])
 }
 
 /// Reads the current row's `iconId` from the game's live parameter repository. This keeps
@@ -753,19 +692,4 @@ fn signature_matches(addr: usize, expected: &[u8]) -> bool {
 
 fn plausible(ptr: usize) -> bool {
     (0x1_0000..0x0000_7FFF_FFFF_FFFF).contains(&ptr)
-}
-
-#[cfg(test)]
-mod frontend_address_tests {
-    use super::*;
-
-    #[test]
-    fn supported_executables_use_their_own_frontend_layout() {
-        for candidate in &CANDIDATES[..2] {
-            assert_eq!(candidate.cs_fe_man_rva, 0x3d6f8f0);
-            assert_eq!(candidate.cs_fe_man_vtable_rva, 0x2aa0a08);
-        }
-        assert_eq!(CANDIDATES[2].cs_fe_man_rva, 0x3d6b880);
-        assert_eq!(CANDIDATES[2].cs_fe_man_vtable_rva, 0x2a9d988);
-    }
 }

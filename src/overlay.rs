@@ -37,9 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const FADE_IN: Duration = Duration::from_millis(120);
 const FADE_OUT: Duration = Duration::from_millis(160);
-const MAX_CARD_LIFETIME: Duration = Duration::from_secs(90);
 const DISMISS_ARM_DELAY: Duration = Duration::from_millis(100);
-const CANDIDATE_LIFETIME: Duration = Duration::from_millis(1500);
 const PANEL_ALPHA: u8 = 232;
 const CONTENT_ALPHA: u8 = 255;
 // Black is transparent outside the card. The icon has its own dark (not black) tile, which
@@ -91,15 +89,8 @@ pub struct LoreEntry {
 }
 
 struct DisplayState {
-    candidates: VecDeque<CandidateEntry>,
     current: Option<CurrentEntry>,
     pending: VecDeque<LoreEntry>,
-    last_panel_visible: Option<bool>,
-}
-
-struct CandidateEntry {
-    entry: LoreEntry,
-    received_at: Instant,
 }
 
 struct CurrentEntry {
@@ -107,85 +98,32 @@ struct CurrentEntry {
     shown_at: Instant,
     closing_at: Option<Instant>,
     dismiss_ready: bool,
-    saw_game_panel: bool,
 }
 
 impl DisplayState {
     fn new() -> Self {
         Self {
-            candidates: VecDeque::new(),
             current: None,
             pending: VecDeque::new(),
-            last_panel_visible: None,
         }
     }
 
-    fn push_candidate(&mut self, entry: LoreEntry, now: Instant) {
-        self.candidates.push_back(CandidateEntry {
-            entry,
-            received_at: now,
-        });
+    fn enqueue(&mut self, entry: LoreEntry) {
+        self.pending.push_back(entry);
     }
 
-    fn tick(&mut self, y_down: bool, panel_visible: Option<bool>, now: Instant) {
-        if panel_visible != self.last_panel_visible {
-            if let Some(visible) = panel_visible {
-                crate::runtime::log_line(if visible {
-                    "LorePickup: blocking game popup became visible."
-                } else {
-                    "LorePickup: blocking game popup closed."
-                });
-            }
-            self.last_panel_visible = panel_visible;
-        }
-
-        while self
-            .candidates
-            .front()
-            .map(|candidate| {
-                now.saturating_duration_since(candidate.received_at) > CANDIDATE_LIFETIME
-            })
-            .unwrap_or(false)
-        {
-            if let Some(expired) = self.candidates.pop_front() {
-                crate::runtime::log_line(&format!(
-                    "LorePickup: candidate expired {} ({:#x}); last panel visibility={panel_visible:?}. None means unreadable, not a routine pickup.",
-                    expired.entry.name, expired.entry.raw_id
-                ));
-            }
-        }
-
-        if panel_visible == Some(true) {
-            while let Some(candidate) = self.candidates.pop_front() {
-                crate::runtime::log_line(&format!(
-                    "LorePickup: confirmed Y-panel item {} ({:#x}, param {}, qty {}).",
-                    candidate.entry.name,
-                    candidate.entry.raw_id,
-                    candidate.entry.param_id,
-                    candidate.entry.quantity
-                ));
-                self.pending.push_back(candidate.entry);
-            }
-        }
-
+    fn tick(&mut self, y_down: bool, now: Instant) {
         if self.current.is_none() {
-            self.advance(now, panel_visible == Some(true));
+            self.advance(now);
         }
 
         if let Some(current) = self.current.as_mut() {
             let age = now.saturating_duration_since(current.shown_at);
-            if panel_visible == Some(true) {
-                current.saw_game_panel = true;
-            }
             if !current.dismiss_ready && !y_down && age >= DISMISS_ARM_DELAY {
                 current.dismiss_ready = true;
             }
 
-            let game_panel_closed = current.saw_game_panel && panel_visible == Some(false);
-            if current.closing_at.is_none()
-                && ((current.dismiss_ready && y_down)
-                    || game_panel_closed
-                    || age >= MAX_CARD_LIFETIME)
+            if current.closing_at.is_none() && current.dismiss_ready && y_down
             {
                 current.closing_at = Some(now);
             }
@@ -196,19 +134,18 @@ impl DisplayState {
                 .unwrap_or(false)
             {
                 self.current = None;
-                self.advance(now, panel_visible == Some(true));
+                self.advance(now);
             }
         }
     }
 
-    fn advance(&mut self, now: Instant, panel_visible: bool) {
+    fn advance(&mut self, now: Instant) {
         if let Some(entry) = self.pending.pop_front() {
             self.current = Some(CurrentEntry {
                 entry,
                 shown_at: now,
                 closing_at: None,
                 dismiss_ready: false,
-                saw_game_panel: panel_visible,
             });
         }
     }
@@ -239,14 +176,14 @@ static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
 static BACKGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 static CONTENT_HWND: AtomicIsize = AtomicIsize::new(0);
 
-pub fn candidate(entry: LoreEntry) {
+pub fn enqueue(entry: LoreEntry) {
     let display = DISPLAY.get_or_init(|| Mutex::new(DisplayState::new()));
     if let Ok(mut state) = display.lock() {
         crate::runtime::log_line(&format!(
-            "LorePickup: staged presentation candidate {} ({:#x}, param {}, qty {}).",
+            "LorePickup: queued flagged item panel {} ({:#x}, param {}, qty {}).",
             entry.name, entry.raw_id, entry.param_id, entry.quantity
         ));
-        state.push_candidate(entry, Instant::now());
+        state.enqueue(entry);
     }
 }
 
@@ -346,13 +283,12 @@ fn overlay_thread() -> Result<(), String> {
 
             let now = Instant::now();
             let y_down = controller_y_down();
-            let panel_visible = crate::runtime::item_panel_visible();
 
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
-                state.tick(y_down, panel_visible, now);
+                state.tick(y_down, now);
                 state.snapshot(now)
             } else {
                 None
@@ -1345,62 +1281,74 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
+
 #[cfg(test)]
 mod pickup_tests {
     use super::*;
 
-    fn item(raw_id: u32, name: &str) -> LoreEntry {
-        LoreEntry {
-            raw_id, param_id: raw_id & 0x0fff_ffff, quantity: 1,
-            name: name.into(), description: "Game description".into(),
-            icon_id: None, details: Vec::new(),
+    fn recorded_pickup(state: &mut DisplayState, id: u32, name: &str, metadata: u32) {
+        if crate::presentation::classify(metadata).shows_card() {
+            state.enqueue(LoreEntry {
+                raw_id: id, param_id: id & 0x0fff_ffff, quantity: 1,
+                name: name.into(), description: "Game description".into(),
+                icon_id: None, details: Vec::new(),
+            });
         }
     }
 
     #[test]
-    fn first_and_repeat_items_both_qualify_with_a_confirmed_panel() {
-        for (id, name) in [(0x400006c2, "Kukri"), (0x1002e6f8, "Exile Gauntlets")] {
+    fn recorded_tears_form_a_deck_and_routine_pickups_cannot_join_it() {
+        let mut state = DisplayState::new();
+        let now = Instant::now();
+        for (id, name) in [(0x40002b15, "Magic"), (0x40002b16, "Lightning"), (0x40002b17, "Holy")] {
+            recorded_pickup(&mut state, id, name, 0x10100);
+        }
+        recorded_pickup(&mut state, 0x40003aca, "Budding Horn", 0xcc000000);
+        state.tick(false, now);
+        assert_eq!(state.snapshot(now).unwrap().queued, 2);
+        for (index, expected) in ["Magic", "Lightning", "Holy"].into_iter().enumerate() {
+            let time = now + Duration::from_secs(index as u64);
+            assert_eq!(state.snapshot(time).unwrap().entry.name, expected);
+            state.tick(false, time + Duration::from_millis(200));
+            state.tick(true, time + Duration::from_millis(250));
+            state.tick(true, time + Duration::from_millis(450));
+            state.tick(true, time + Duration::from_millis(650));
+            if let Some(current) = state.current.as_ref() {
+                assert!(current.closing_at.is_none(), "held Y must not skip the next card");
+            }
+        }
+        assert!(state.snapshot(now).is_none());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn existing_kukri_and_new_exile_gauntlets_do_not_need_a_hud_transition() {
+        let now = Instant::now();
+        for (id, name, flags) in [(0x400006c2, "Kukri", 0x10000), (0x1002e6f8, "Exile Gauntlets", 0xcc000100)] {
             let mut state = DisplayState::new();
-            let now = Instant::now();
             for repeat in 0..2 {
-                let start = now + Duration::from_secs(repeat * 2);
-                state.push_candidate(item(id, name), start);
-                state.tick(false, Some(true), start);
-                assert_eq!(state.snapshot(start).unwrap().entry.raw_id, id);
-                state.tick(false, Some(false), start + Duration::from_millis(200));
-                state.tick(false, Some(false), start + Duration::from_millis(400));
-                assert!(state.snapshot(start + Duration::from_millis(400)).is_none());
+                let time = now + Duration::from_secs(repeat * 3);
+                recorded_pickup(&mut state, id, name, flags);
+                state.tick(true, time); // Y held from collecting the item
+                state.tick(true, time + Duration::from_secs(1));
+                assert_eq!(state.snapshot(time).unwrap().entry.raw_id, id);
+                assert!(state.current.as_ref().unwrap().closing_at.is_none());
+                state.tick(false, time + Duration::from_millis(1200));
+                state.tick(true, time + Duration::from_millis(1400));
+                state.tick(false, time + Duration::from_millis(1600));
+                assert!(state.snapshot(time).is_none());
             }
         }
     }
 
     #[test]
-    fn no_popup_does_not_show_a_routine_pickup() {
+    fn cards_do_not_expire_on_the_small_log_timer() {
         let mut state = DisplayState::new();
         let now = Instant::now();
-        state.push_candidate(item(0x40005118, "Mushroom"), now);
-        state.tick(false, Some(false), now);
-        state.tick(false, Some(false), now + Duration::from_secs(2));
-        assert!(state.snapshot(now).is_none());
-        assert!(state.candidates.is_empty());
-    }
-
-    #[test]
-    fn held_y_does_not_skip_the_second_stacked_card() {
-        let mut state = DisplayState::new();
-        let now = Instant::now();
-        state.push_candidate(item(0x400006c2, "Kukri"), now);
-        state.push_candidate(item(0x1002e6f8, "Exile Gauntlets"), now);
-        state.tick(false, Some(true), now);
-        assert_eq!(state.snapshot(now).unwrap().queued, 1);
-        state.tick(false, Some(true), now + Duration::from_millis(150));
-        state.tick(true, Some(true), now + Duration::from_millis(200));
-        state.tick(true, Some(true), now + Duration::from_millis(400));
-        state.tick(true, Some(true), now + Duration::from_millis(600));
-        assert_eq!(state.snapshot(now).unwrap().entry.name, "Exile Gauntlets");
+        recorded_pickup(&mut state, 0x20000488, "Stalwart Horn Charm", 0x10100);
+        state.tick(false, now);
+        state.tick(false, now + Duration::from_secs(120));
         assert!(state.current.as_ref().unwrap().closing_at.is_none());
-        state.tick(false, Some(true), now + Duration::from_millis(700));
-        state.tick(true, Some(true), now + Duration::from_millis(800));
-        assert!(state.current.as_ref().unwrap().closing_at.is_some());
+        assert_eq!(state.snapshot(now).unwrap().entry.name, "Stalwart Horn Charm");
     }
 }

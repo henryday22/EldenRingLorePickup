@@ -12,7 +12,7 @@ static HOOK: OnceLock<GenericDetour<ItemPopupFn>> = OnceLock::new();
 const POPUP_ID_OFFSET: usize = 0x00;
 const POPUP_QUANTITY_OFFSET: usize = 0x04;
 const POPUP_KIND_OFFSET: usize = 0x08;
-const POPUP_GEM_OFFSET: usize = 0x0C;
+const POPUP_METADATA_OFFSET: usize = 0x0C;
 
 pub fn install() -> Result<(), String> {
     if HOOK.get().is_some() {
@@ -65,10 +65,10 @@ unsafe extern "C" fn item_popup_detour(manager: *mut c_void, entry: *mut c_void)
     } else {
         unsafe { ((entry as *const u8).add(POPUP_KIND_OFFSET) as *const u32).read_unaligned() }
     };
-    let gem = if entry.is_null() {
+    let metadata = if entry.is_null() {
         0
     } else {
-        unsafe { ((entry as *const u8).add(POPUP_GEM_OFFSET) as *const u32).read_unaligned() }
+        unsafe { ((entry as *const u8).add(POPUP_METADATA_OFFSET) as *const u32).read_unaligned() }
     };
 
     let ret = HOOK
@@ -77,10 +77,16 @@ unsafe extern "C" fn item_popup_detour(manager: *mut c_void, entry: *mut c_void)
         .unwrap_or(0);
 
     runtime::log_line(&format!(
-        "LorePickup: item presentation candidate raw={raw_id:#x}, quantity={quantity}, kind={kind:#x}, gem={gem:#x}."
+        "LorePickup: item presentation candidate raw={raw_id:#x}, quantity={quantity}, kind={kind:#x}, metadata={metadata:#x}."
     ));
 
-    let _ = std::panic::catch_unwind(|| process_popup(raw_id, quantity));
+    let _ = std::panic::catch_unwind(|| {
+        let decision = crate::presentation::classify(metadata);
+        runtime::log_line(&format!("LorePickup: presentation decision raw={raw_id:#x}: {decision:?}."));
+        if decision.shows_card() {
+            process_popup(raw_id, quantity);
+        }
+    });
 
     ret
 }
@@ -109,11 +115,9 @@ fn process_popup(raw_id: u32, quantity: i32) {
         return;
     };
 
-    let description = caption.filter(|s| !s.trim().is_empty()).unwrap_or_default();
-
-    if description.trim().is_empty() {
-        return;
-    }
+    let description = caption.filter(|s| !s.trim().is_empty())
+        .or_else(|| info.clone().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "No lore description is provided for this item.".to_string());
 
     // Some builds return zero from the live row even though a valid static mapping exists.
     // Never let that sentinel suppress the bundled icon, and verify the PNG before accepting it.
@@ -128,7 +132,7 @@ fn process_popup(raw_id: u32, quantity: i32) {
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
     ));
 
-    overlay::candidate(overlay::LoreEntry {
+    overlay::enqueue(overlay::LoreEntry {
         raw_id,
         param_id,
         quantity,
