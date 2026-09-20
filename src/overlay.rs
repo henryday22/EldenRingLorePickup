@@ -942,6 +942,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         footer_top + collection_height,
         text_right,
         footer_height - collection_height,
+        collection_height,
         snapshot.queued,
         scrollable,
         if footer_font.is_null() { stock_font } else { footer_font },
@@ -1097,6 +1098,7 @@ unsafe fn draw_footer(
     top: i32,
     right: i32,
     height: i32,
+    collection_height: i32,
     queued: usize,
     scrollable: bool,
     font: *mut std::ffi::c_void,
@@ -1104,8 +1106,8 @@ unsafe fn draw_footer(
 ) {
     let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(91, 88, 70));
     let old_pen = SelectObject(hdc, separator);
-    MoveToEx(hdc, left, top - px(10.0), null_mut());
-    LineTo(hdc, right, top - px(10.0));
+    MoveToEx(hdc, left, top - collection_height - px(10.0), null_mut());
+    LineTo(hdc, right, top - collection_height - px(10.0));
     SelectObject(hdc, old_pen);
     DeleteObject(separator);
 
@@ -1457,7 +1459,7 @@ mod pickup_tests {
                     let recipe=crate::insight::Recipe {name:"Test Cure".into(),effect:"Alleviates poison buildup".into(),output_category:0x40000000,output_id:1,output_quantity:1,
                         ingredients:vec![crate::insight::Ingredient{category:0x40000000,id:1,name:"Herb".into(),quantity:2},crate::insight::Ingredient{category:0x40000000,id:2,name:"Moss".into(),quantity:1}],containers:vec![],unlock_required:true,complete:true};
                     snapshot.entry.details=vec!["COLLECTION  127/2500 collected · NEW CARD".into(),format!("WHY KEEP IT  {}",crate::insight::ingredient_paragraph("Herb",&[recipe.clone()]))];
-                    for i in 1..=4 {snapshot.entry.details.push(format!("RECIPE {i}  {}",recipe.explanation()));}
+                    for i in 1..=8 {snapshot.entry.details.push(format!("RECIPE {i}  {}",recipe.explanation()));}
                 }
                 if name.starts_with("overflow") {
                     snapshot.entry.description = snapshot.entry.description.repeat(3);
@@ -1466,7 +1468,7 @@ mod pickup_tests {
                 let brush = CreateSolidBrush(rgb(0,0,0)); FillRect(dc,&rect,brush); DeleteObject(brush);
                 draw_card(dc,&rect,&snapshot,PaintLayer::Background);
                 draw_card(dc,&rect,&snapshot,PaintLayer::Content);
-                if name.starts_with("overflow") {
+                if name.starts_with("overflow") || name.starts_with("ingredient") {
                     assert!(MAX_SCROLL.load(Ordering::Relaxed) > 0, "preview must actually exercise scrolling");
                 }
                 windows_sys::Win32::Graphics::Gdi::GdiFlush();
