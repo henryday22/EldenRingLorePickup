@@ -12,7 +12,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect,
     GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, RoundRect, SelectObject,
     SetBkMode, SetTextColor, ANTIALIASED_QUALITY, SaveDC, RestoreDC, IntersectClipRect, GetTextFaceW, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DEFAULT_PITCH, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
     DT_VCENTER, DT_WORDBREAK, FF_ROMAN, FW_NORMAL, FW_SEMIBOLD, HDC, OUT_TT_PRECIS,
     PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
