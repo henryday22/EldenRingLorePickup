@@ -468,7 +468,7 @@ fn recipe_book() -> &'static [crate::insight::Recipe] {
             let (Some(name),effect,_) = lookup_item_text(category,id as u32) else { continue; };
             let mut ingredients=Vec::new();let mut complete=true;
             for slot in 0..6 {
-                let Some(material_id)=read_i32(set+slot*4).filter(|id| *id >= 0) else { continue; };
+                let Some(material_id)=read_i32(set+slot*4).filter(|id| *id > 0) else { continue; };
                 // Material categories are item-ID categories, NOT ShopLineup equipType.
                 let raw_category=read_u8(set+0x28+slot).unwrap_or(255);
                 let material_category=match raw_category { 1=>0x10000000,4=>0x40000000,_=>0xF0000000 };
@@ -481,7 +481,10 @@ fn recipe_book() -> &'static [crate::insight::Recipe] {
             }
             if ingredients.is_empty() { continue; }
             let required_containers=if category==0x40000000 {
-                param_row(0x160,id as u32).and_then(|output|read_u8(output+0x2E)).and_then(|group|containers.get(&group)).cloned().unwrap_or_default()
+                match param_row(0x160,id as u32).and_then(|output|read_u8(output+0x2E)).filter(|group| *group < 16) {
+                    Some(group) => containers.get(&group).cloned().unwrap_or_else(||{complete=false;vec!["unresolved reusable container".into()]}),
+                    None => Vec::new(),
+                }
             } else {Vec::new()};
             book.push(crate::insight::Recipe{name,effect:effect.unwrap_or_default().replace(['\r','\n']," "),
                 output_category:category,output_id:id as u32,output_quantity:read_u16(row+0x1A).filter(|v| *v > 0 && *v <= 999).unwrap_or(1),

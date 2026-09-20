@@ -137,6 +137,20 @@ mod tests {
         );
     }
     #[test]
+    fn export_journal_preview() {
+        let Ok(directory)=std::env::var("LOREPICKUP_PREVIEW_DIR") else {return;};
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut db=Collection::default();db.catalogue_ready=true;
+        for i in 0..2500 {db.catalogue.insert(format!("catalogue-{i}"));}
+        for (profile,name,item,category,description,details) in [
+            ("strength","Strength journey","Heavy Halberd +8","Weapons","Layout fixture: a weapon with long reach and deliberate attacks.",vec!["REQUIRES  STR 14 · DEX 12","BASE ATTACK  Physical 190 (illustrative value)","YOUR BUILD  Your base attributes meet the requirements. Equipment bonuses and temporary effects are not included in this check.","IN PRACTICE  Reach is its advantage: punish an approaching enemy before they get close. Check both light and heavy attacks, since halberds differ in their mix of thrusts and sweeps."]),
+            ("strength","Strength journey","Herb — recipe sample","Items","Layout fixture for an ingredient with several uses.",vec!["WHY KEEP IT  Keep Herb to craft Test Cure: alleviates poison buildup. Keep a supply for areas or enemies that inflict this condition; a cure can save a flask or a retreat. You will also need Moss ×1.","RECIPE 1  Test Cure ×1 — Alleviates poison buildup. Needs Herb ×2, Moss ×1. Unlock this recipe in Item Crafting first."]),
+            ("faith","Faith journey","Example incantation","Items","A separate character's discovery.",vec!["REQUIRES  FAI 24","MEMORY  1 slot(s)"]),
+        ] {db.record(profile,name,Card{key:item.into(),name:item.into(),category:category.into(),description:description.into(),details:details.into_iter().map(str::to_string).collect(),icon_id:None});}
+        std::fs::write(std::path::Path::new(&directory).join("journal.html"),html(&db)).unwrap();
+    }
+
+    #[test]
     fn hostile_item_text_cannot_escape_the_journal_data_block() {
         let mut db = Collection::default();
         let mut c = card(10000);
