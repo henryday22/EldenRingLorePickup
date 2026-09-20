@@ -25,6 +25,7 @@ pub struct GameRuntime {
     pub fmg_search_rva: usize,
     pub solo_param_slot: usize,
     pub cs_fe_man_slot: usize,
+    pub cs_fe_man_vtable: usize,
     pub label: &'static str,
 }
 
@@ -34,6 +35,7 @@ struct Candidate {
     fmg_repo_rva: usize,
     fmg_search_rva: usize,
     cs_fe_man_rva: usize,
+    cs_fe_man_vtable_rva: usize,
     label: &'static str,
 }
 
@@ -42,21 +44,24 @@ const CANDIDATES: &[Candidate] = &[
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FC40,
-        cs_fe_man_rva: 0x03D6_B880,
+        cs_fe_man_rva: 0x03D6_F8F0,
+        cs_fe_man_vtable_rva: 0x02AA_0A08,
         label: "ER 2.7.1.0 / 1.17-era",
     },
     Candidate {
         add_item_rva: 0x0056_1400,
         fmg_repo_rva: 0x03D8_1568,
         fmg_search_rva: 0x0266_FBD0,
-        cs_fe_man_rva: 0x03D6_B880,
+        cs_fe_man_rva: 0x03D6_F8F0,
+        cs_fe_man_vtable_rva: 0x02AA_0A08,
         label: "ER 2.7.0.0 / Tarnished Edition",
     },
     Candidate {
         add_item_rva: 0x0056_05B0,
         fmg_repo_rva: 0x03D7_D4F8,
         fmg_search_rva: 0x0266_D3C0,
-        cs_fe_man_rva: 0,
+        cs_fe_man_rva: 0x03D6_B880,
+        cs_fe_man_vtable_rva: 0x02A9_D988,
         label: "ER 2.6.2.0",
     },
 ];
@@ -99,13 +104,10 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
                 fmg_repo_rva: candidate.fmg_repo_rva,
                 fmg_search_rva: candidate.fmg_search_rva,
                 solo_param_slot: find_solo_param_slot(base).unwrap_or(0),
-                cs_fe_man_slot: find_cs_fe_man_slot(base).unwrap_or_else(|| {
-                    if candidate.cs_fe_man_rva == 0 {
-                        0
-                    } else {
-                        base + candidate.cs_fe_man_rva
-                    }
-                }),
+                // These are paired with the executable signatures above. The old broad scan
+                // silently fell back to a 1.16 singleton address on 1.17.
+                cs_fe_man_slot: base + candidate.cs_fe_man_rva,
+                cs_fe_man_vtable: base + candidate.cs_fe_man_vtable_rva,
                 label: candidate.label,
             };
             log_line(&format!(
@@ -123,25 +125,50 @@ pub fn detect_runtime() -> Result<GameRuntime, String> {
     Err("known item/message signatures not present".to_string())
 }
 
-/// Returns whether Elden Ring is currently in its blocking popup-menu HUD state.
-///
-/// The large item panel that waits for Y/OK uses `CSFeManHudState::PopupMenu` (2).
-/// Ordinary right-side pickup logs leave the HUD in `Default` (3). Reading this one-byte
-/// state lets the game make the presentation decision; LorePickup only follows it.
+/// Read the frontend HUD state only from a version-matched CSFeManImp object.
+/// A failed read is UNKNOWN, not evidence that a pickup was routine.
+/// The association between PopupMenu and item panels still needs an in-game check.
 pub fn item_panel_visible() -> Option<bool> {
     let runtime = RUNTIME.get()?;
-    if runtime.cs_fe_man_slot == 0 {
-        return None;
-    }
-
-    unsafe {
-        let fe_man = read_ptr(runtime.cs_fe_man_slot)?;
-        match read_u8(fe_man.checked_add(0x78)?)? {
-            2 => Some(true),
-            0 | 1 | 3 => Some(false),
-            _ => None,
+    let probe = crate::panel_probe::probe(
+        runtime.cs_fe_man_slot,
+        runtime.cs_fe_man_vtable,
+        safe_read_usize,
+        safe_read_byte,
+    );
+    static LAST_PROBE: Mutex<Option<crate::panel_probe::PanelProbe>> = Mutex::new(None);
+    if let Ok(mut last) = LAST_PROBE.lock() {
+        if last.as_ref() != Some(&probe) {
+            log_line(&format!("LorePickup: panel probe {probe:?}."));
+            *last = Some(probe);
         }
     }
+    probe.visible()
+}
+
+// Windows performs the read so a singleton being destroyed cannot cause an access violation
+// on the overlay thread. Do not dereference an address simply because it looks like a pointer.
+fn safe_read<const N: usize>(address: usize) -> Option<[u8; N]> {
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    if !plausible(address) {
+        return None;
+    }
+    let mut value = [0u8; N];
+    let mut read = 0usize;
+    let ok = unsafe {
+        ReadProcessMemory(GetCurrentProcess(), address as *const c_void,
+            value.as_mut_ptr().cast(), N, &mut read)
+    };
+    (ok != 0 && read == N).then_some(value)
+}
+
+fn safe_read_usize(address: usize) -> Option<usize> {
+    safe_read(address).map(usize::from_ne_bytes)
+}
+
+fn safe_read_byte(address: usize) -> Option<u8> {
+    safe_read::<1>(address).map(|value| value[0])
 }
 
 /// Reads the current row's `iconId` from the game's live parameter repository. This keeps
@@ -639,37 +666,6 @@ fn find_solo_param_slot(base: usize) -> Option<usize> {
     (instruction + 7).checked_add_signed(displacement)
 }
 
-fn find_cs_fe_man_slot(base: usize) -> Option<usize> {
-    // mov rcx,[CSFeManImp]; mov ebx,edx; test rcx,rcx; jne ...
-    // Publicly used by Erd-Tools and other native Elden Ring tooling. The first instruction's
-    // RIP target is a `CSFeManImp*` slot. Keep the checked 1.17 RVA fallback above as a second
-    // independent anchor for the executable family used by the current game.
-    const PATTERN: &[i16] = &[
-        0x48, 0x8B, 0x0D, -1, -1, -1, -1, 0x8B, 0xDA, 0x48, 0x85, 0xC9, 0x75, -1, 0x48,
-        0x8D, 0x0D, -1, -1, -1, -1, 0xE8, -1, -1, -1, -1, 0x4C, 0x8B, 0xC8,
-    ];
-
-    let (text, size) = pe_text_section(base)?;
-    let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, size) };
-    let mut matches = bytes
-        .windows(PATTERN.len())
-        .enumerate()
-        .filter_map(|(offset, window)| {
-            window
-                .iter()
-                .zip(PATTERN)
-                .all(|(&actual, &expected)| expected < 0 || actual == expected as u8)
-                .then_some(offset)
-        });
-    let offset = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    let instruction = text.checked_add(offset)?;
-    let displacement = unsafe { ((instruction + 3) as *const i32).read_unaligned() } as isize;
-    (instruction + 7).checked_add_signed(displacement)
-}
-
 fn find_item_popup_rva(base: usize) -> Option<usize> {
     // The game's large item-acquisition panel calls this function with (MapItemMan + 0xA0,
     // ItemPopupEntry*). The Grand Archives signature begins 0x14 bytes into the function:
@@ -757,4 +753,19 @@ fn signature_matches(addr: usize, expected: &[u8]) -> bool {
 
 fn plausible(ptr: usize) -> bool {
     (0x1_0000..0x0000_7FFF_FFFF_FFFF).contains(&ptr)
+}
+
+#[cfg(test)]
+mod frontend_address_tests {
+    use super::*;
+
+    #[test]
+    fn supported_executables_use_their_own_frontend_layout() {
+        for candidate in &CANDIDATES[..2] {
+            assert_eq!(candidate.cs_fe_man_rva, 0x3d6f8f0);
+            assert_eq!(candidate.cs_fe_man_vtable_rva, 0x2aa0a08);
+        }
+        assert_eq!(CANDIDATES[2].cs_fe_man_rva, 0x3d6b880);
+        assert_eq!(CANDIDATES[2].cs_fe_man_vtable_rva, 0x2a9d988);
+    }
 }

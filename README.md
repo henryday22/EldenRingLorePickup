@@ -9,20 +9,24 @@ moment it is useful without opening the inventory or pausing play.
 
 ## Current release
 
-**v0.8.0 replaces the illustrated card experiment with a compact modern interface and changes the
-trigger architecture.** The item hook now creates only a short-lived candidate. A card is shown
-only if Elden Ring itself enters its blocking popup-menu state. Ordinary right-side pickup logs do
-not meet that condition and are ignored.
+**v0.8.1 fixes a confirmed frontend-address error in v0.8.0.** Version 0.8.0 used the
+1.16 frontend singleton address as its fallback for 1.17. The supplied pickup log captured Kukri
+and Exile Gauntlets successfully but discarded both because that popup probe never resolved.
+The 1.17 address is now corrected and its object identity is checked before the HUD state is read.
 
-Download the ready-to-install package from the
-[v0.8.0 GitHub release](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.8.0).
-It contains the DLL and the complete compact icon folder.
+[Download v0.8.1](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.8.1).
+Replace the DLL, retain the icon folder and existing `.me3` configuration, then restart the game.
+
+**Validation:** automated memory-probe and queue tests plus a Windows build. This is a prerelease
+pending an in-game check. The association of HUD state 2 with all Y-dismissable item panels has
+not been verified in the user's game. This release fixes the proven address bug; it does not claim
+that a direct item-panel hook has been implemented or that all popup behavior is confirmed.
 
 ## Features
 
-- Uses Elden Ring's blocking popup state as the authority for whether a card should appear.
-- Accepts repeat items when the game itself gives them a large Y/OK panel.
-- Ignores routine pickups that produce only the small right-side log.
+- Uses a validated frontend HUD-state probe to gate item candidates.
+- Does not filter by item ownership or first-time pickup history.
+- Suppresses candidates when the frontend probe does not confirm a popup.
 - Reads names and lore from the game's live message repository in the game's current language.
 - Supports weapons, armour, talismans, goods and Ashes of War across base-game and DLC tables.
 - Resolves each item's live inventory icon, with a bundled mapping fallback.
@@ -65,7 +69,7 @@ ME3 resolves native paths relative to the `.me3` profile.
 
 ## Behaviour
 
-The v0.8.0 panel:
+The panel is intended to behave as follows:
 
 - opens only when an item presentation candidate coincides with Elden Ring's large blocking popup;
 - remains paired with that game panel instead of inheriting the short right-side log lifetime;
@@ -113,7 +117,7 @@ GitHub Actions also builds and packages the DLL on every push.
 
 The item presentation hook supplies a raw item ID and quantity, but that signal alone is too broad:
 the same path can be reached for routine pickups. LorePickup therefore stages the item for 1.5
-seconds and promotes it only while `CSFeManImp` reports `CSFeManHudState::PopupMenu` (`2`). Normal
+seconds and promotes it only while the validated `CSFeManImp` reports `CSFeManHudState::PopupMenu` (`2`). Normal
 gameplay and small pickup logs remain in `Default` (`3`).
 
 The item ID encodes its category in the high nibble. LorePickup queries the game's live
@@ -127,3 +131,16 @@ The item ID encodes its category in the high nibble. LorePickup queries the game
 
 DLC1 and DLC2 fallbacks are included. See `THIRD_PARTY_NOTICES.md` for the public
 reverse-engineering references used by the project.
+
+### Frontend probe correction
+
+The known 2.7.0.0/2.7.1.0 executable signatures select singleton RVA `0x3D6F8F0` and
+CSFeManImp vtable RVA `0x2AA0A08`. The 2.6.2.0 signatures select `0x3D6B880` and
+`0x2A9D988`. An unverified broad signature scan no longer overrides this mapping.
+Reads use `ReadProcessMemory` and reject null, unreadable and mismatched objects. The log
+records every probe change, including the first unavailable result, without logging each frame.
+`None` in candidate-expiry messages means the probe was unavailable, not that the pickup was routine.
+
+To check in-game: compare an existing-item Y/OK panel, a first-time-item Y/OK panel, and an
+ordinary small-log pickup; also dismiss with Y and check a multiple-item pickup. Inspect the
+new session's `panel probe` entries if any case still fails.

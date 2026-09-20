@@ -61,3 +61,15 @@ source or binary code is included.
 
 The source repository contains only numeric item-to-icon fallback mappings. Game artwork is not
 committed to this source tree.
+
+## Version-specific frontend addresses
+
+The numerical 1.16.2-to-1.17 mappings were cross-checked against Banon-Labs/er-mods-rs,
+commit d0f41fd44020c77f2c2809800e3a965e0353f656:
+
+- `docs/recon/rva-map-1162-to-1170.data.tsv`: CSFEMAN_SINGLETON_RVA 0x3D6B880 -> 0x3D6F8F0 (125/125 references).
+- `docs/recon/npc-possess-1170-address-table.md`: CSFeManImp vtable 0x2A9D988 -> 0x2AA0A08.
+
+Repository: https://github.com/Banon-Labs/er-mods-rs
+
+Only numerical addresses were used; no implementation code from that project was copied.

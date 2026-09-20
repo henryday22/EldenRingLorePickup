@@ -3,6 +3,7 @@
 mod icons;
 mod overlay;
 mod pickup;
+mod panel_probe;
 mod runtime;
 
 use std::ffi::c_void;
@@ -47,7 +48,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.8.0 bootstrap: game-state-gated Y-panel cards with modern UI; no DirectX hooks.",
+            "LorePickup v0.8.1 bootstrap: corrected 1.17 frontend address with validated panel reads; no DirectX hooks.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {

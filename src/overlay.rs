@@ -149,7 +149,7 @@ impl DisplayState {
         {
             if let Some(expired) = self.candidates.pop_front() {
                 crate::runtime::log_line(&format!(
-                    "LorePickup: ignored routine pickup {} ({:#x}); no blocking game popup appeared.",
+                    "LorePickup: candidate expired {} ({:#x}); last panel visibility={panel_visible:?}. None means unreadable, not a routine pickup.",
                     expired.entry.name, expired.entry.raw_id
                 ));
             }
@@ -1343,4 +1343,64 @@ unsafe fn draw_paragraphs(
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+}
+
+#[cfg(test)]
+mod pickup_tests {
+    use super::*;
+
+    fn item(raw_id: u32, name: &str) -> LoreEntry {
+        LoreEntry {
+            raw_id, param_id: raw_id & 0x0fff_ffff, quantity: 1,
+            name: name.into(), description: "Game description".into(),
+            icon_id: None, details: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn first_and_repeat_items_both_qualify_with_a_confirmed_panel() {
+        for (id, name) in [(0x400006c2, "Kukri"), (0x1002e6f8, "Exile Gauntlets")] {
+            let mut state = DisplayState::new();
+            let now = Instant::now();
+            for repeat in 0..2 {
+                let start = now + Duration::from_secs(repeat * 2);
+                state.push_candidate(item(id, name), start);
+                state.tick(false, Some(true), start);
+                assert_eq!(state.snapshot(start).unwrap().entry.raw_id, id);
+                state.tick(false, Some(false), start + Duration::from_millis(200));
+                state.tick(false, Some(false), start + Duration::from_millis(400));
+                assert!(state.snapshot(start + Duration::from_millis(400)).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn no_popup_does_not_show_a_routine_pickup() {
+        let mut state = DisplayState::new();
+        let now = Instant::now();
+        state.push_candidate(item(0x40005118, "Mushroom"), now);
+        state.tick(false, Some(false), now);
+        state.tick(false, Some(false), now + Duration::from_secs(2));
+        assert!(state.snapshot(now).is_none());
+        assert!(state.candidates.is_empty());
+    }
+
+    #[test]
+    fn held_y_does_not_skip_the_second_stacked_card() {
+        let mut state = DisplayState::new();
+        let now = Instant::now();
+        state.push_candidate(item(0x400006c2, "Kukri"), now);
+        state.push_candidate(item(0x1002e6f8, "Exile Gauntlets"), now);
+        state.tick(false, Some(true), now);
+        assert_eq!(state.snapshot(now).unwrap().queued, 1);
+        state.tick(false, Some(true), now + Duration::from_millis(150));
+        state.tick(true, Some(true), now + Duration::from_millis(200));
+        state.tick(true, Some(true), now + Duration::from_millis(400));
+        state.tick(true, Some(true), now + Duration::from_millis(600));
+        assert_eq!(state.snapshot(now).unwrap().entry.name, "Exile Gauntlets");
+        assert!(state.current.as_ref().unwrap().closing_at.is_none());
+        state.tick(false, Some(true), now + Duration::from_millis(700));
+        state.tick(true, Some(true), now + Duration::from_millis(800));
+        assert!(state.current.as_ref().unwrap().closing_at.is_some());
+    }
 }
