@@ -165,18 +165,18 @@ pub fn lookup_icon_id(category: u32, param_id: u32) -> Option<u32> {
 }
 
 /// Compact, factual item data used by the card's lower information panel.
-pub fn lookup_item_details(category: u32, param_id: u32, info: Option<&str>) -> Vec<String> {
+pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Option<&str>) -> Vec<String> {
     let mut lines = match category {
         0x0000_0000 => weapon_details(param_id),
         0x1000_0000 => weight_details(0xD0, param_id, 0x24, "Armour", true),
         0x2000_0000 => weight_details(0x118, param_id, 0x0C, "Talisman", false),
-        0x4000_0000 => goods_details(param_id),
+        0x4000_0000 => goods_details(param_id, name),
         0x8000_0000 => vec!["TYPE  Ash of War".to_string()],
         _ => Vec::new(),
     };
 
     if let Some(summary) = info.map(str::trim).filter(|text| !text.is_empty()) {
-        let summary = compact_summary(&summary.replace(['\r', '\n'], " "), 180);
+        let summary = summary.replace(['\r', '\n'], " ");
         if !lines.iter().any(|line| line.contains(&summary)) {
             if category == 0x0000_0000 {
                 lines.push(format!("EFFECT  {summary}"));
@@ -185,83 +185,92 @@ pub fn lookup_item_details(category: u32, param_id: u32, info: Option<&str>) -> 
             }
         }
     }
-    lines
-}
-
-fn compact_summary(text: &str, max_chars: usize) -> String {
-    let mut result = text.chars().take(max_chars).collect::<String>();
-    if text.chars().count() > max_chars {
-        while result.ends_with(char::is_whitespace) {
-            result.pop();
-        }
-        result.push('…');
+    if category == 0x1000_0000 {
+        lines.push("IN PRACTICE  Armour is not class-locked. Choose weight you can carry while keeping your preferred roll; staying below 70% of maximum equip load preserves a medium roll.".into());
+    } else if category == 0x2000_0000 {
+        lines.push("IN PRACTICE  Choose this for its listed effect rather than a character class. Talismans can be swapped to suit a boss or a weapon; you do not need to spend levels to equip one.".into());
+    } else if category == 0x8000_0000 {
+        lines.push("IN PRACTICE  Apply at a Site of Grace to a compatible armament. The skill and the affinity are separate choices; the available affinities also depend on your whetblades.".into());
     }
-    result
+    lines
 }
 
 fn weapon_details(param_id: u32) -> Vec<String> {
     let Some(row) = param_row(0x88, param_id) else {
         return vec!["TYPE  Weapon".to_string()];
     };
-
     unsafe {
-        let requirements = [
-            ("STR", read_u8(row + 0xF2)),
-            ("DEX", read_u8(row + 0xF3)),
-            ("INT", read_u8(row + 0xF4)),
-            ("FAI", read_u8(row + 0xF5)),
-            ("ARC", read_u8(row + 0x195)),
-        ];
-        let req = requirements
-            .iter()
-            .filter_map(|(name, value)| value.filter(|&v| v > 0).map(|v| format!("{name} {v}")))
-            .collect::<Vec<_>>();
-
-        let damage = [
-            ("Physical", read_u16(row + 0xC8)),
-            ("Magic", read_u16(row + 0xCA)),
-            ("Fire", read_u16(row + 0xCC)),
-            ("Lightning", read_u16(row + 0xCE)),
-            ("Holy", read_u16(row + 0x18C)),
-        ];
-        let affinities = damage
-            .iter()
-            .filter_map(|(name, value)| value.filter(|&v| v > 0).map(|v| format!("{name} {v}")))
-            .collect::<Vec<_>>();
-
-        let corrections = [
-            ("Strength", read_f32(row + 0x24).unwrap_or(0.0)),
-            ("Dexterity", read_f32(row + 0x28).unwrap_or(0.0)),
-            ("Intelligence", read_f32(row + 0x2C).unwrap_or(0.0)),
-            ("Faith", read_f32(row + 0x30).unwrap_or(0.0)),
-            ("Arcane", read_f32(row + 0x19C).unwrap_or(0.0)),
-        ];
-        let mut ranked = corrections.to_vec();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let build = if ranked[0].1 <= 0.0 {
-            "Any build".to_string()
-        } else if ranked[1].1 >= ranked[0].1 * 0.82 {
-            format!("{} / {} build", ranked[0].0, ranked[1].0)
-        } else {
-            format!("{} build", ranked[0].0)
-        };
-
+        let kind = read_u16(row + 0x1A6).unwrap_or(0);
+        let (class, note) = crate::guidance::weapon_class(kind);
+        let level = param_id % 100;
         let affinity = affinity_label(param_id);
-        let mut lines = vec![format!("AFFINITY  {affinity}")];
-        if !req.is_empty() {
-            lines.push(format!("REQUIREMENTS  {}", req.join(" · ")));
+        let weight = read_f32(row + 0x10).filter(|v| v.is_finite() && *v >= 0.0 && *v < 1000.0);
+        let mut lines = vec![format!("TYPE  {class} · {affinity} · +{level}")];
+        let req = [("STR",0xF2),("DEX",0xF3),("INT",0xF4),("FAI",0xF5),("ARC",0x195)]
+            .iter().filter_map(|(name, offset)| read_u8(row + offset)
+                .filter(|v| *v > 0).map(|v| format!("{name} {v}"))).collect::<Vec<_>>();
+        if !req.is_empty() { lines.push(format!("REQUIRES  {}", req.join(" · "))); }
+
+        // EquipParamWeapon's attack values omit reinforcement. Use its reinforceTypeId to
+        // resolve the corresponding ReinforceParamWeapon row; never call raw +0 values +8.
+        let reinforce = read_u16(row + 0xDA).and_then(|id| param_row(0x1A8, id as u32));
+        let factors = [0, 4, 8, 12, 0x58].map(|offset| reinforce
+            .and_then(|r| read_f32(r + offset)).filter(|v| v.is_finite() && *v > 0.0 && *v < 100.0));
+        let damage = [("Physical",0xC8),("Magic",0xCA),("Fire",0xCC),("Lightning",0xCE),("Holy",0x18C)];
+        let values = damage.iter().enumerate().filter_map(|(i,(name,offset))| {
+            let base = read_u16(row + offset)?;
+            if base == 0 { return None; }
+            Some(format!("{name} {}", (base as f32 * factors[i].unwrap_or(1.0)).floor() as u32))
+        }).collect::<Vec<_>>();
+        if !values.is_empty() && !matches!(kind, 57 | 61 | 65 | 67 | 69 | 90) {
+            let label = if factors.iter().all(Option::is_some) { "BASE ATTACK" } else { "RAW BASE" };
+            lines.push(format!("{label}  {}", values.join(" · ")));
         }
-        if !affinities.is_empty() {
-            lines.push(format!("DAMAGE  {}", affinities.join(" · ")));
+        let corrections = [("STR",0x24,0x1C),("DEX",0x28,0x20),("INT",0x2C,0x24),("FAI",0x30,0x28),("ARC",0x19C,0x60)];
+        let mut ranked: Vec<(&str,f32)> = corrections.iter().filter_map(|(name,offset,rate_offset)| {
+            let value = read_f32(row + offset)?;
+            let rate = reinforce.and_then(|r| read_f32(r + rate_offset)).unwrap_or(1.0);
+            let value = value * rate;
+            (value.is_finite() && value > 0.0 && value < 10000.0).then_some((*name,value))
+        }).collect();
+        ranked.sort_by(|a,b| b.1.total_cmp(&a.1));
+        if let Some(&(_, best)) = ranked.first() {
+            let main = ranked.iter().filter(|(_,v)| *v >= best * 0.8).map(|(name,_)| *name).collect::<Vec<_>>();
+            lines.push(format!("SCALING  Mainly {} (relative weapon scaling)", main.join(" / ")));
         }
-        if let Some(arts_id) = read_i32(row + 0x198).filter(|&id| id > 0) {
+        if let Some(arts_id) = read_i32(row + 0x198).filter(|id| *id > 0) {
             if let Some(runtime) = RUNTIME.get() {
                 if let Some(name) = lookup_first(runtime, &[42, 331, 431], arts_id as u32) {
                     lines.push(format!("SKILL  {name}"));
                 }
             }
         }
-        lines.push(format!("BEST FOR  {build}"));
+        let mut buildup = [0i32; 6];
+        for slot in 0..3 {
+            let Some(effect_id) = read_i32(row + 0x48 + slot * 4).filter(|id| *id > 0) else { continue; };
+            let increment = reinforce.and_then(|r| read_u8(r + 0x50 + slot)).unwrap_or(0);
+            if let Some(effect) = param_row(0x4C0, effect_id as u32 + u32::from(increment)) {
+                for (i, offset) in [0xCC, 0xD0, 0xD4, 0x1A8, 0x338, 0x33C].iter().enumerate() {
+                    if let Some(value) = read_i32(effect + offset).filter(|v| *v > 0 && *v < 10000) {
+                        buildup[i] += value;
+                    }
+                }
+            }
+        }
+        let passive = ["Poison", "Scarlet rot", "Bleed", "Frost", "Sleep", "Madness"]
+            .iter().zip(buildup).filter(|(_, value)| *value > 0)
+            .map(|(name, value)| format!("{name} {value}")).collect::<Vec<_>>();
+        if !passive.is_empty() { lines.push(format!("BASE BUILDUP  {} (before attribute bonuses)", passive.join(" · "))); }
+        if let Some(weight) = weight { lines.push(format!("WEIGHT  {weight:.1}")); }
+        lines.push(format!("IN PRACTICE  {note}"));
+        if !matches!(kind, 50..=69 | 81..=86 | 89 | 90) {
+            if let Some(strength) = read_u8(row + 0xF2).filter(|v| *v > 1) {
+                lines.push(format!("TWO-HANDING  {} STR meets the {} STR requirement when two-handed; other requirements still apply.", crate::guidance::two_hand_requirement(strength), strength));
+            }
+        }
+        if !values.is_empty() && !matches!(kind, 57 | 61 | 65 | 67 | 69 | 90) {
+            lines.push("DAMAGE NOTE  Base attack excludes your attribute bonus and enemy defences; it is not the damage each hit will deal.".into());
+        }
         lines
     }
 }
@@ -291,9 +300,9 @@ fn weight_details(
     }
 }
 
-fn goods_details(param_id: u32) -> Vec<String> {
+fn goods_details(param_id: u32, name: &str) -> Vec<String> {
     let Some(row) = param_row(0x160, param_id) else {
-        return vec!["TYPE  Item".to_string()];
+        return crate::guidance::goods_note(255, name).map(|note| vec![format!("IN PRACTICE  {note}")]).unwrap_or_default();
     };
     let goods_type = unsafe { read_u8(row + 0x3E) }.unwrap_or(0);
     if let Some(lines) = whetblade_guidance(param_id) {
@@ -304,6 +313,9 @@ fn goods_details(param_id: u32) -> Vec<String> {
     let recipes = crafting_outputs(param_id);
     if !recipes.is_empty() {
         lines.push(format!("USED TO MAKE  {}", recipes.join(" · ")));
+    }
+    if let Some(note) = crate::guidance::goods_note(goods_type, name) {
+        lines.push(format!("IN PRACTICE  {note}"));
     }
     lines
 }
@@ -423,9 +435,6 @@ fn crafting_outputs(material_id: u32) -> Vec<String> {
             if seen.insert((equip_type, output_id)) {
                 if let Some(name) = lookup_first(runtime, categories, output_id) {
                     names.push(name);
-                    if names.len() == 4 {
-                        break;
-                    }
                 }
             }
         }

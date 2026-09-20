@@ -126,7 +126,7 @@ fn process_popup(raw_id: u32, quantity: i32) {
     let icon_id = live_icon
         .filter(|&id| crate::icons::icon_path(id).is_some())
         .or_else(|| fallback_icon.filter(|&id| crate::icons::icon_path(id).is_some()));
-    let details = runtime::lookup_item_details(category, param_id, info.as_deref());
+    let details = runtime::lookup_item_details(category, param_id, &name, info.as_deref());
 
     runtime::log_line(&format!(
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."

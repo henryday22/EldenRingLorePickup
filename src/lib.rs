@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 mod icons;
+mod guidance;
 mod overlay;
 mod pickup;
 mod presentation;
@@ -48,7 +49,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.8.2 bootstrap: per-item presentation flags and Y-dismissed deck; no DirectX hooks.",
+            "LorePickup v0.9.0 bootstrap: centred popup styling and practical item guidance; v0.8.2 trigger preserved.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {

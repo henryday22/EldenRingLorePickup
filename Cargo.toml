@@ -1,6 +1,6 @@
 [package]
 name = "elden-ring-lore-pickup"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 description = "Show Elden Ring item lore automatically when an item is acquired."
 repository = "https://github.com/henryday22/EldenRingLorePickup"

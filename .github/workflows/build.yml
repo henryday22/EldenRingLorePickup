@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "v0.9.0-preview"]
   pull_request:
   workflow_dispatch:
 
@@ -21,7 +21,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Test presentation metadata and pickup queue
+      - name: Test pickup queue, details and Windows rendering
+        env:
+          LOREPICKUP_PREVIEW_DIR: previews
         run: cargo test --target x86_64-pc-windows-msvc
 
       - name: Build release DLL
@@ -50,37 +52,51 @@ jobs:
           python -m pip install --disable-pip-version-check pillow
           python scripts/build_icon_bundle.py icon-source/menu/low/00_solo dist/EldenRingLorePickup-icons
 
+      - name: Export renderer previews
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pillow
+          python -c "from PIL import Image; from pathlib import Path; [Image.open(p).convert('RGB').save(p.with_suffix('.png')) for p in Path('previews').glob('*.bmp')]"
+
+      - name: Upload renderer previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: LorePickup-renderer-previews
+          path: previews/*.png
+
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.8.2.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.9.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.8.2
-          path: EldenRingLorePickup-v0.8.2.zip
+          name: EldenRingLorePickup-v0.9.0
+          path: EldenRingLorePickup-v0.9.0.zip
 
-      - name: Publish v0.8.2 release
+      - name: Publish v0.9.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.8.2
+          tag_name: v0.9.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.8.2 — Per-item presentation flags
+          name: LorePickup v0.9.0 — Centred cards and practical item notes
           prerelease: true
           body: |
-            Removes the HUD-state gate entirely. The v0.8.1 log proved Hud(3) remains active while Y/OK item panels are visible.
+            Keeps the v0.8.2 pickup classification and Y dismissal logic that the user confirmed working.
 
-            Classifies each pickup using the two presentation bytes observed in the supplied logs: the NEW-item flag or the forced-panel flag. This covers existing Kukri, NEW Exile Gauntlets, Stalwart Horn Charm and all three Cracked Tears; ordinary unflagged pickups are filtered separately, even while cards are queued. Dirty padding bytes do not count as a flag.
+            Cards now centre vertically using their measured height and the visible stack. Warm charcoal, muted gold-grey rules and ivory serif text replace the blue-grey rounded styling. Uses an installed Agmena face when available, otherwise Garamond/Georgia; this is a visual approximation, not the game's actual UI renderer or a bundled game font.
 
-            Cards queue immediately and remain until Y. The old 1.5-second candidate expiration and 90-second reading limit are gone. Three qualifying pickups create an ordered three-card deck. Holding Y cannot skip the next card.
+            Adds practical item notes alongside original lore. Weapons prioritise class, affinity, requirements, reinforcement-adjusted base attack, relative scaling, skill, base status buildup and weight, with class-specific usage advice and two-handed Strength requirements. Casting tools do not mislabel melee damage as spell damage. Materials retain their complete recipe output list. Consumables, spells, summons, upgrade materials, armour and talismans get relevant usage guidance where supported. Notes are authored rules; they are not invented game lore or bespoke essays for every item.
 
-            Validation: automated tests against recorded metadata values and queue/input scenarios, plus a Windows build. This is a prerelease: the flag interpretation is inferred from the supplied traces and has not been verified in-game after this change. Dismissal observes controller Y, not the actual panel-close event; keyboard/remapped input and closure by death/loading are not synchronized.
+            Long cards keep their font size: LB/RB scroll the text while the title and Y prompt remain visible. These inputs are observed, not intercepted, so the game can also receive them.
 
-            Close the game, replace EldenRingLorePickup.dll, keep the icons and .me3 entry, then relaunch. The modern appearance and information rows are unchanged.
-          files: EldenRingLorePickup-v0.8.2.zip
+            Validation: automated regression tests and actual Windows GDI renderer previews at 864p, 1080p and 1440p, plus the release build. New styling and live parameter reads still require in-game verification.
+
+            Close the game, replace EldenRingLorePickup.dll, keep the icons and .me3 entry, then relaunch. No new artwork or font installation is required.
+          files: EldenRingLorePickup-v0.9.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

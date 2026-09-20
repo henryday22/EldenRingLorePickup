@@ -2,29 +2,46 @@
 
 Displays item lore, inventory icons and useful gameplay details in a modern side panel.
 
-## v0.8.2: remove the incorrect HUD-state gate
+## v0.9.0: centred cards, popup palette, useful field notes
 
-[Download v0.8.2](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.8.2).
+[Download v0.9.0](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.9.0).
 
-The v0.8.1 session log showed a valid `Hud(3)` read throughout the Stalwart Horn Charm and
-three Cracked Tear panels. The general frontend HUD flag does not indicate whether these
-Y/OK item panels are open. It is no longer read or used for card eligibility or dismissal.
+The v0.8.2 pickup trigger and controller-Y dismissal are preserved. The user confirmed that
+version now displays cards for their item panels. This revision changes presentation and item
+information, not the event filter.
 
-The pickup entry already includes per-item presentation metadata. In the supplied 1.17 traces:
+- **Position:** each card and its visible stack are vertically centred using the measured text
+  height, including after a window resize or advancing to a different item.
+- **Appearance:** warm charcoal, restrained gold-grey double rules, ivory serif text and a ringed
+  Y prompt. No parchment image, particle effect or blue-grey rounded border.
+- **Font:** an installed Agmena Pro / Agmena W1G / Agmena face is preferred, then Garamond and
+  Georgia. Proprietary game fonts are not bundled; the default is an approximation, not a claim
+  of a pixel-identical reproduction of the game renderer.
+- **Weapons:** class, affinity, upgrade level, requirements, base attack with reinforcement where
+  available, leading scaling attributes, skill, base status buildup and weight. Practical notes
+  explain the weapon class and the reduced Strength requirement when two-handed. Base attack is
+  explicitly distinguished from player-adjusted attack rating or actual damage dealt; a casting
+  tool's melee attack is not presented as spell damage. Scaling guidance compares coefficients,
+  not the damage of a specific character build.
+- **Other items:** practical notes for materials, grease, cookbooks, bell bearings, upgrade stones,
+  spirits, spells, tears, armour, talismans and Ashes of War, alongside original game lore/effects.
+  Recipes are no longer silently limited to the first four outputs. Whetblade affinity guidance
+  remains available. Unknown items retain their original text without fabricated lore.
+- **Long descriptions:** keep readable type and scroll with **LB/RB** when the footer says
+  “read more”. The title and Y prompt remain fixed. These buttons are observed, not intercepted;
+  they may also reach the game. Short cards require no scrolling.
 
-| Pickup | Metadata word at +0x0c | Result |
-|---|---|---|
-| Existing Kukri | `0x00010000` | Queue a card |
-| NEW Exile Gauntlets | `0xcc000100` | Queue a card |
-| Stalwart Horn Charm | `0x00010100` | Queue a card |
-| Each of the three Cracked Tears | `0x00010100` | Queue three ordered cards |
-| Ordinary Rowa Fruit / Erdleaf Flower | `0x00000000` | No card |
-| Ordinary Mushroom / Budding Horn | `0xcc000000` | No card |
+The extra prose is authored category/use guidance selected from live item data and, for certain
+consumables, English item names. It is not a unique generated story for every item. Numerical
+values come from game parameters rather than a bundled balance database. Non-English item
+names still receive category guidance; English-name-specific notes may not appear.
 
-Only byte +0x0d (observed NEW flag) and byte +0x0e (observed forced-panel flag) determine the
-classification; a value of 1 in either qualifies. Non-boolean values fail closed and are logged.
-The unrelated bytes, including the often-dirty `0xcc` padding, cannot trigger a card.
-This is an inference from captured game events, not a fully reverse-engineered struct contract.
+## Pickup eligibility
+
+The previous global HUD flag is not used. Per-item metadata at +0x0d or +0x0e must equal 1.
+This interpretation was inferred from supplied game traces, then confirmed working by the user
+in v0.8.2. Examples covered by regression tests include existing Kukri, NEW Exile Gauntlets,
+Stalwart Horn Charm and the three Cracked Tears. Ordinary unflagged pickups remain excluded.
 
 ## Installation
 
@@ -57,15 +74,16 @@ The old `EldenRingLorePickup-card.png` is unused. No background artwork is requi
   again to dismiss; each subsequent card also waits for a release before accepting another press.
 - Dismissal is a 160 ms fade, with no particle effect.
 - Lore text and icons remain opaque over a translucent charcoal panel.
-- Weapons prioritise affinity, requirements, base damage and skill. Crafting materials list recipe
-  outputs where live params provide them; Whetblades explain the affinities they unlock.
+- Item details are read from live params; Whetblades explain the affinities they unlock.
 - Missing caption text falls back to the item's short description instead of suppressing the card.
 
 ## Validation and limits
 
-This is a **prerelease requiring in-game verification**. Automated tests use the exact metadata
+The v0.8.2 trigger has user confirmation; v0.9.0 styling and added param reads still need in-game
+verification. Automated tests use the exact metadata
 values from the supplied logs and exercise the three-Tear queue, repeat items, ordinary pickups,
-long reading times and held Y. The Windows DLL is built in GitHub Actions.
+long reading times and held Y. The Windows DLL is built in GitHub Actions. Actual GDI renderer previews cover 864p, 1080p,
+1440p, a short card, a long card and its scrolled bottom. Layout checks cover up to 2160p.
 
 The previous HUD gate is removed entirely. This release observes controller Y rather than the
 actual item-panel close event. Keyboard/remapped confirm input, panels closed by death/loading,
@@ -73,7 +91,7 @@ and unusual input timing are not yet synchronized. It does not claim end-to-end 
 support for every unobserved presentation path. The observed metadata interpretation is grounded
 in the user's 2.7.1.0 / 1.17-era sessions; older runtime patterns remain compatibility candidates.
 
-The diagnostic log is `EldenRingLorePickup.log` in the game's working directory. A v0.8.2
+The diagnostic log is `EldenRingLorePickup.log` in the game's working directory. A v0.9.0
 session logs `metadata=`, its `presentation decision`, and the queued item names. It should not
 produce `panel probe` or `candidate expired` entries.
 

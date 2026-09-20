@@ -81,3 +81,14 @@ v0.8.1 log showed Hud(3) throughout item panels. The two flag-byte interpretatio
 `src/presentation.rs` are inferred from user-supplied logs and screenshots (Kukri, Exile Gauntlets,
 Stalwart Horn Charm and the three Cracked Tears). They are not attributed to the older
 Grand Archives ItemPopup script, which labelled the metadata word differently.
+
+
+## v0.9.0 item data and type references
+
+Added weapon field offsets and reinforcement/status-effect layouts were checked against
+[Paramdex ER definitions](https://github.com/soulsmods/Paramdex/tree/master/ER/Defs) and
+[the fromsoftware-rs Elden Ring structs](https://github.com/vswarte/fromsoftware-rs).
+Weapon-type numeric mappings were checked against
+[Smithbox WEP_TYPE](https://github.com/vawser/Smithbox/blob/main/src/Smithbox.Data/Assets/PARAM/ER/Param%20Enums/WEP_TYPE.json).
+Practical notes are original category-level guidance, not copied wiki articles or invented lore.
+Original lore is read from the user's game. No proprietary font or new background image is bundled.

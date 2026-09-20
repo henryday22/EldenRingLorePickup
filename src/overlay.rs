@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,9 +11,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect,
     GetStockObject, InvalidateRect, LineTo, MoveToEx, Rectangle, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    SetBkMode, SetTextColor, ANTIALIASED_QUALITY, SaveDC, RestoreDC, IntersectClipRect, GetTextFaceW, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
     DEFAULT_PITCH, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, FF_SWISS, FW_NORMAL, FW_SEMIBOLD, HDC, OUT_TT_PRECIS,
+    DT_VCENTER, DT_WORDBREAK, FF_ROMAN, FW_NORMAL, FW_SEMIBOLD, HDC, OUT_TT_PRECIS,
     PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::Graphics::GdiPlus::{
@@ -24,7 +24,7 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::XboxController::{
-    XInputGetState, XINPUT_GAMEPAD_Y, XINPUT_STATE,
+    XInputGetState, XINPUT_GAMEPAD_Y, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_STATE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetClientRect,
@@ -65,17 +65,16 @@ const CLASS_NAME: &[u16] = &[
     b'y' as u16,
     0,
 ];
-const FONT_FACE: &[u16] = &[
-    b'S' as u16,
-    b'e' as u16,
-    b'g' as u16,
-    b'o' as u16,
-    b'e' as u16,
-    b' ' as u16,
-    b'U' as u16,
-    b'I' as u16,
-    0,
-];
+// Prefer a locally installed original face; do not bundle proprietary game fonts.
+static FONT_FACE: OnceLock<Vec<u16>> = OnceLock::new();
+
+fn centred_top(view_height: i32, panel_height: i32, rear_extent: i32) -> i32 {
+    ((view_height - panel_height - rear_extent) / 2).max(0)
+}
+
+fn scroll_offset(steps: i32, content_height: i32, viewport_height: i32, step: i32) -> i32 {
+    steps.saturating_mul(step).clamp(0, (content_height - viewport_height).max(0))
+}
 
 #[derive(Clone, Debug)]
 pub struct LoreEntry {
@@ -98,6 +97,7 @@ struct CurrentEntry {
     shown_at: Instant,
     closing_at: Option<Instant>,
     dismiss_ready: bool,
+    scroll: i32,
 }
 
 impl DisplayState {
@@ -146,6 +146,7 @@ impl DisplayState {
                 shown_at: now,
                 closing_at: None,
                 dismiss_ready: false,
+                scroll: 0,
             });
         }
     }
@@ -159,6 +160,7 @@ impl DisplayState {
                 .closing_at
                 .map(|closing| now.saturating_duration_since(closing)),
             queued: self.pending.len(),
+            scroll: current.scroll,
         })
     }
 }
@@ -170,11 +172,13 @@ struct DisplaySnapshot {
     age: Duration,
     closing_age: Option<Duration>,
     queued: usize,
+    scroll: i32,
 }
 
 static DISPLAY: OnceLock<Mutex<DisplayState>> = OnceLock::new();
 static BACKGROUND_HWND: AtomicIsize = AtomicIsize::new(0);
 static CONTENT_HWND: AtomicIsize = AtomicIsize::new(0);
+static MAX_SCROLL: AtomicI32 = AtomicI32::new(0);
 
 pub fn enqueue(entry: LoreEntry) {
     let display = DISPLAY.get_or_init(|| Mutex::new(DisplayState::new()));
@@ -275,6 +279,8 @@ fn overlay_thread() -> Result<(), String> {
         let mut painted_entry: Option<Instant> = None;
         let mut painted_queue: Option<usize> = None;
         let mut applied_alpha = 0u8;
+        let mut previous_scroll_buttons = (false, false);
+        let mut painted_scroll = None;
         loop {
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
@@ -283,16 +289,23 @@ fn overlay_thread() -> Result<(), String> {
 
             let now = Instant::now();
             let y_down = controller_y_down();
+            let scroll_buttons = controller_scroll_buttons();
 
             let snapshot = if let Ok(mut state) = DISPLAY
                 .get_or_init(|| Mutex::new(DisplayState::new()))
                 .lock()
             {
                 state.tick(y_down, now);
+                if let Some(current) = state.current.as_mut() {
+                    if scroll_buttons.1 && !previous_scroll_buttons.1 { current.scroll = (current.scroll + 1).min(MAX_SCROLL.load(Ordering::Relaxed)); }
+                    if scroll_buttons.0 && !previous_scroll_buttons.0 { current.scroll = (current.scroll - 1).max(0); }
+                }
                 state.snapshot(now)
             } else {
                 None
             };
+
+            previous_scroll_buttons = scroll_buttons;
 
             if let Some(snapshot) = snapshot {
                 let alignment_changed =
@@ -321,18 +334,21 @@ fn overlay_thread() -> Result<(), String> {
                 // window every 16 ms caused GDI to expose its transparent clear between drawing
                 // passes, which looked like the game was flickering through the card.
                 let content_changed = painted_entry != Some(snapshot.shown_at)
-                    || painted_queue != Some(snapshot.queued);
+                    || painted_queue != Some(snapshot.queued)
+                    || painted_scroll != Some(snapshot.scroll);
                 if content_changed || alignment_changed {
                     InvalidateRect(background, null(), 0);
                     InvalidateRect(content, null(), 0);
                     painted_entry = Some(snapshot.shown_at);
                     painted_queue = Some(snapshot.queued);
+                    painted_scroll = Some(snapshot.scroll);
                 }
             } else {
                 // The overlay is a real absence when idle, not an invisible full-screen window.
                 hide_overlay(background, content, &mut shown);
                 painted_entry = None;
                 painted_queue = None;
+                painted_scroll = None;
                 applied_alpha = 0;
             }
 
@@ -619,14 +635,14 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     let icon_gap = px(20.0);
     let title_size = px(31.0).max(24);
     let body_size = px(20.0).max(16);
-    let detail_size = px(16.0).max(13);
+    let detail_size = px(18.0).max(14);
     let label_size = px(12.0).max(10);
     let footer_size = px(14.0).max(11);
     let title_gap = px(20.0);
     let text_width = panel_width - pad_x * 2;
     let title_width = (text_width - icon_size - icon_gap).max(px(280.0));
 
-    let title_font = create_ui_font(title_size, FW_SEMIBOLD as i32);
+    let title_font = create_ui_font(title_size, FW_NORMAL as i32);
     let body_font = create_ui_font(body_size, FW_NORMAL as i32);
     let detail_font = create_ui_font(detail_size, FW_NORMAL as i32);
     let label_font = create_ui_font(label_size, FW_SEMIBOLD as i32);
@@ -661,7 +677,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         detail_font
     };
     SelectObject(hdc, selected_detail);
-    let detail_label_width = px(122.0).max(92);
+    let detail_label_width = px(112.0).max(86);
     let detail_value_width = (text_width - detail_label_width - px(12.0)).max(px(230.0));
     let detail_gap = px(9.0).max(6);
     let details_height = if entry.details.is_empty() {
@@ -673,10 +689,11 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
                 .details
                 .iter()
                 .map(|line| {
-                    let (_, value) = split_detail(line);
-                    measure_text(hdc, value, detail_value_width)
-                        .max(detail_size + px(3.0))
-                        + detail_gap
+                    let (label, value) = split_detail(line);
+                    let full = is_note(label);
+                    measure_text(hdc, value, if full { text_width } else { detail_value_width })
+                        .max(detail_size + px(3.0)) + detail_gap
+                        + if full { label_size + px(8.0) } else { 0 }
                 })
                 .sum::<i32>()
     };
@@ -689,14 +706,15 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         + body_height
         + if entry.details.is_empty() { 0 } else { px(31.0) }
         + details_height
-        + px(22.0)
+        + px(36.0)
         + footer_height
         + pad_bottom;
     let panel_height = natural_height
         .max(px(310.0))
         .min(height - px(76.0));
     let right = width - margin_right;
-    let top = px(38.0);
+    let rear_extent = px(10.0) * snapshot.queued.min(2) as i32;
+    let top = centred_top(height, panel_height, rear_extent);
     let bottom = top + panel_height;
     let left = right - panel_width;
     let panel = RECT {
@@ -707,14 +725,14 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     };
 
     if layer == PaintLayer::Background {
-        let radius = px(18.0).max(12);
+        let radius = 1;
         let shadow = RECT {
             left: panel.left + px(5.0),
             top: panel.top + px(7.0),
             right: panel.right + px(5.0),
             bottom: panel.bottom + px(7.0),
         };
-        draw_rounded_panel(hdc, &shadow, rgb(7, 9, 12), rgb(7, 9, 12), radius, 1);
+        draw_rounded_panel(hdc, &shadow, rgb(10, 10, 8), rgb(10, 10, 8), radius, 1);
 
         // Always render a visible physical stack when another card is queued. Two rear cards are
         // enough to communicate the deck without consuming more of the game view.
@@ -731,8 +749,8 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
             draw_rounded_panel(
                 hdc,
                 &rear,
-                rgb(31, 36, 44),
-                rgb(92, 103, 117),
+                rgb(31, 30, 24),
+                rgb(106, 102, 84),
                 radius,
                 px(1.0).max(1),
             );
@@ -741,20 +759,14 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         draw_rounded_panel(
             hdc,
             &panel,
-            rgb(20, 24, 30),
-            rgb(86, 98, 113),
+            rgb(25, 25, 20),
+            rgb(87, 84, 68),
             radius,
             px(1.0).max(1),
         );
-        let accent = RECT {
-            left: panel.left,
-            top: panel.top + radius,
-            right: panel.left + px(4.0).max(3),
-            bottom: panel.bottom - radius,
-        };
-        let accent_brush = CreateSolidBrush(rgb(201, 161, 78));
-        FillRect(hdc, &accent, accent_brush);
-        DeleteObject(accent_brush);
+        // Fine double rules, with tapered ends, echo the game's item window.
+        draw_popup_rule(hdc, panel.left + px(8.0), panel.right - px(8.0), panel.top + px(5.0), px);
+        draw_popup_rule(hdc, panel.left + px(8.0), panel.right - px(8.0), panel.bottom - px(5.0), px);
 
         SelectObject(hdc, old_font);
         delete_fonts(&[title_font, body_font, detail_font, label_font, footer_font]);
@@ -787,7 +799,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y,
         text_right,
         y + label_size + px(5.0),
-        rgb(198, 160, 81),
+        rgb(181, 174, 148),
         DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
     );
     SelectObject(hdc, selected_title);
@@ -798,7 +810,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y + label_size + px(8.0),
         text_right,
         y + header_height,
-        rgb(246, 247, 249),
+        rgb(240, 237, 222),
         DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
     );
     if snapshot.queued > 0 {
@@ -811,13 +823,24 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
             y,
             text_right,
             y + label_size + px(5.0),
-            rgb(158, 169, 182),
+            rgb(175, 171, 151),
             DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX,
         );
     }
     y += header_height + title_gap;
+    let footer_top = panel.bottom - pad_bottom - footer_height;
+    let viewport_top = y;
+    let viewport_bottom = footer_top - px(23.0);
+    let viewport_height = (viewport_bottom - viewport_top).max(1);
+    let content_height = natural_height - pad_top - header_height - title_gap - px(36.0) - footer_height - pad_bottom;
+    let scroll = scroll_offset(snapshot.scroll, content_height, viewport_height, px(100.0));
+    let scrollable = content_height > viewport_height;
+    MAX_SCROLL.store(((content_height - viewport_height).max(0) + px(100.0) - 1) / px(100.0), Ordering::Relaxed);
+    let saved_dc = SaveDC(hdc);
+    IntersectClipRect(hdc, text_left, viewport_top, text_right, viewport_bottom);
+    y -= scroll;
 
-    let rule = CreatePen(PS_SOLID, px(1.0).max(1), rgb(66, 76, 88));
+    let rule = CreatePen(PS_SOLID, px(1.0).max(1), rgb(107, 103, 83));
     let old_pen = SelectObject(hdc, rule);
     MoveToEx(hdc, text_left, y, null_mut());
     LineTo(hdc, text_right, y);
@@ -833,7 +856,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y,
         text_right,
         y + label_size + px(4.0),
-        rgb(150, 163, 178),
+        rgb(174, 168, 143),
         DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
     );
     y += label_size + px(10.0);
@@ -846,12 +869,12 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         y,
         text_right,
         paragraph_gap,
-        rgb(224, 229, 234),
+        rgb(224, 221, 207),
     );
 
     if !entry.details.is_empty() {
         y += px(21.0);
-        let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(58, 68, 80));
+        let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(91, 88, 70));
         let previous = SelectObject(hdc, separator);
         MoveToEx(hdc, text_left, y, null_mut());
         LineTo(hdc, text_right, y);
@@ -866,7 +889,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
             y,
             text_right,
             y + label_size + px(4.0),
-            rgb(150, 163, 178),
+            rgb(174, 168, 143),
             DT_LEFT | DT_SINGLELINE | DT_NOPREFIX,
         );
         y += label_size + px(12.0);
@@ -874,7 +897,8 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         for line in &entry.details {
             let (label, value) = split_detail(line);
             SelectObject(hdc, selected_detail);
-            let line_height = measure_text(hdc, value, detail_value_width)
+            let full = is_note(label);
+            let line_height = measure_text(hdc, value, if full { text_width } else { detail_value_width })
                 .max(detail_size + px(3.0));
             SelectObject(hdc, if label_font.is_null() { stock_font } else { label_font });
             draw_text_coloured(
@@ -882,27 +906,28 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
                 label,
                 text_left,
                 y,
-                text_left + detail_label_width,
-                y + line_height,
-                rgb(201, 161, 78),
+                if full { text_right } else { text_left + detail_label_width },
+                y + if full { label_size + px(5.0) } else { line_height },
+                rgb(191, 180, 132),
                 DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
+            if full { y += label_size + px(8.0); }
             SelectObject(hdc, selected_detail);
             draw_text_coloured(
                 hdc,
                 value,
-                text_left + detail_label_width + px(12.0),
+                if full { text_left } else { text_left + detail_label_width + px(12.0) },
                 y,
                 text_right,
                 y + line_height,
-                rgb(235, 238, 241),
+                rgb(234, 230, 213),
                 DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
             y += line_height + detail_gap;
         }
     }
 
-    let footer_top = panel.bottom - pad_bottom - footer_height;
+    RestoreDC(hdc, saved_dc);
     draw_footer(
         hdc,
         text_left,
@@ -910,6 +935,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         text_right,
         footer_height,
         snapshot.queued,
+        scrollable,
         if footer_font.is_null() { stock_font } else { footer_font },
         px,
     );
@@ -931,9 +957,9 @@ unsafe fn create_ui_font(size: i32, weight: i32) -> *mut std::ffi::c_void {
         DEFAULT_CHARSET.into(),
         OUT_TT_PRECIS.into(),
         CLIP_DEFAULT_PRECIS.into(),
-        CLEARTYPE_QUALITY.into(),
-        (DEFAULT_PITCH | FF_SWISS).into(),
-        FONT_FACE.as_ptr(),
+        ANTIALIASED_QUALITY.into(),
+        (DEFAULT_PITCH | FF_ROMAN).into(),
+        font_face().as_ptr(),
     )
 }
 
@@ -943,6 +969,61 @@ unsafe fn delete_fonts(fonts: &[*mut std::ffi::c_void]) {
             DeleteObject(font);
         }
     }
+}
+
+fn is_note(label: &str) -> bool {
+    matches!(label, "IN PRACTICE" | "TWO-HANDING" | "DAMAGE NOTE" | "USE" | "SCALING NOTE")
+}
+
+fn font_face() -> &'static [u16] {
+    FONT_FACE.get_or_init(|| unsafe {
+        let dc = CreateCompatibleDC(null_mut());
+        for name in ["Agmena Pro", "Agmena W1G", "Agmena", "Garamond", "Georgia"] {
+            let face: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let font = CreateFontW(-20,0,0,0,FW_NORMAL as i32,0,0,0,DEFAULT_CHARSET.into(),
+                OUT_TT_PRECIS.into(), CLIP_DEFAULT_PRECIS.into(), ANTIALIASED_QUALITY.into(),
+                (DEFAULT_PITCH | FF_ROMAN).into(), face.as_ptr());
+            let old = SelectObject(dc, font);
+            let mut actual = [0u16; 128];
+            let len = GetTextFaceW(dc, actual.len() as i32, actual.as_mut_ptr());
+            SelectObject(dc, old);
+            DeleteObject(font);
+            let actual = String::from_utf16_lossy(&actual[..(len.max(1) as usize - 1).min(127)]);
+            if actual.eq_ignore_ascii_case(name) {
+                DeleteDC(dc);
+                crate::runtime::log_line(&format!("LorePickup: popup font {name}."));
+                return face;
+            }
+        }
+        DeleteDC(dc);
+        "Georgia".encode_utf16().chain(Some(0)).collect()
+    })
+}
+
+unsafe fn draw_popup_rule(hdc: HDC, left: i32, right: i32, y: i32, px: impl Fn(f32) -> i32) {
+    let width = (right - left).max(1);
+    for i in 0..32 {
+        let strength = ((i.min(31 - i) as f32 / 6.0).min(1.0) * 90.0) as u8;
+        let pen = CreatePen(PS_SOLID, px(1.0).max(1), rgb(38+strength, 37+strength, 29+(u16::from(strength)*3/4) as u8));
+        let old = SelectObject(hdc, pen);
+        MoveToEx(hdc, left + width*i/32, y, null_mut());
+        LineTo(hdc, left + width*(i+1)/32, y);
+        MoveToEx(hdc, left + width*i/32, y + px(3.0), null_mut());
+        LineTo(hdc, left + width*(i+1)/32, y + px(3.0));
+        SelectObject(hdc, old);
+        DeleteObject(pen);
+    }
+}
+
+fn controller_scroll_buttons() -> (bool, bool) {
+    let mut buttons = 0u16;
+    unsafe {
+        for index in 0..4 {
+            let mut state: XINPUT_STATE = std::mem::zeroed();
+            if XInputGetState(index, &mut state) == 0 { buttons |= state.Gamepad.wButtons; }
+        }
+    }
+    (buttons & XINPUT_GAMEPAD_LEFT_SHOULDER != 0, buttons & XINPUT_GAMEPAD_RIGHT_SHOULDER != 0)
 }
 
 fn split_detail(line: &str) -> (&str, &str) {
@@ -1009,10 +1090,11 @@ unsafe fn draw_footer(
     right: i32,
     height: i32,
     queued: usize,
+    scrollable: bool,
     font: *mut std::ffi::c_void,
     px: impl Fn(f32) -> i32 + Copy,
 ) {
-    let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(58, 68, 80));
+    let separator = CreatePen(PS_SOLID, px(1.0).max(1), rgb(91, 88, 70));
     let old_pen = SelectObject(hdc, separator);
     MoveToEx(hdc, left, top - px(10.0), null_mut());
     LineTo(hdc, right, top - px(10.0));
@@ -1028,8 +1110,8 @@ unsafe fn draw_footer(
         right: left + button,
         bottom: cy + button / 2,
     };
-    let brush = CreateSolidBrush(rgb(201, 161, 78));
-    let pen = CreatePen(PS_SOLID, 1, rgb(225, 190, 117));
+    let brush = CreateSolidBrush(rgb(25, 25, 20));
+    let pen = CreatePen(PS_SOLID, 1, rgb(216, 206, 156));
     let old_brush = SelectObject(hdc, brush);
     let old_pen = SelectObject(hdc, pen);
     Ellipse(
@@ -1050,17 +1132,17 @@ unsafe fn draw_footer(
         button_rect.top,
         button_rect.right,
         button_rect.bottom,
-        rgb(18, 22, 27),
+        rgb(220, 211, 157),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
     draw_text_coloured(
         hdc,
-        "Dismiss",
+        if scrollable { "OK    LB / RB: read more" } else { "OK" },
         button_rect.right + px(9.0),
         top,
         right,
         top + height,
-        rgb(174, 184, 195),
+        rgb(185, 178, 154),
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
     );
     if queued > 0 {
@@ -1072,7 +1154,7 @@ unsafe fn draw_footer(
             top,
             right,
             top + height,
-            rgb(174, 184, 195),
+            rgb(185, 178, 154),
             DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
     }
@@ -1086,12 +1168,12 @@ unsafe fn draw_icon_panel(
 ) {
     // The icon tile is intentionally opaque so PNG transparency and true black survive the
     // colour-keyed content layer cleanly.
-    let backing = CreateSolidBrush(rgb(27, 32, 39));
+    let backing = CreateSolidBrush(rgb(28, 28, 22));
     FillRect(hdc, rect, backing);
     DeleteObject(backing);
 
     let old_brush = SelectObject(hdc, GetStockObject(5)); // NULL_BRUSH
-    let pen = CreatePen(PS_SOLID, px(1.0).max(1), rgb(75, 86, 99));
+    let pen = CreatePen(PS_SOLID, px(1.0).max(1), rgb(78, 75, 60));
     let old_pen = SelectObject(hdc, pen);
     Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
     SelectObject(hdc, old_pen);
@@ -1152,7 +1234,7 @@ unsafe fn draw_png_exact(hdc: HDC, rect: &RECT, path: &std::path::Path) -> bool 
 }
 
 unsafe fn draw_icon_fallback(hdc: HDC, rect: &RECT, category: u32, px: impl Fn(f32) -> i32 + Copy) {
-    let pen = CreatePen(PS_SOLID, px(4.0).max(2), rgb(193, 163, 96));
+    let pen = CreatePen(PS_SOLID, px(4.0).max(2), rgb(181, 174, 148));
     let old_pen = SelectObject(hdc, pen);
     let old_brush = SelectObject(hdc, GetStockObject(5));
     let cx = (rect.left + rect.right) / 2;
@@ -1285,6 +1367,94 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 #[cfg(test)]
 mod pickup_tests {
     use super::*;
+
+    #[test]
+    fn varied_card_heights_and_stacks_remain_centred() {
+        for screen in [720, 864, 1080, 1440, 2160] {
+            for card in [250, 400, screen - 76] {
+                for rear in [0, 10, 20] {
+                    let top = centred_top(screen, card, rear);
+                    assert!((top * 2 + card + rear - screen).abs() <= 1);
+                    assert!(top >= 0 && top + card + rear <= screen);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn long_content_can_reach_bottom_without_scrolling_short_content() {
+        assert_eq!(scroll_offset(5, 400, 500, 100), 0);
+        assert_eq!(scroll_offset(0, 1500, 500, 100), 0);
+        assert_eq!(scroll_offset(1, 1500, 500, 100), 100);
+        assert_eq!(scroll_offset(100, 1500, 500, 100), 1000);
+    }
+
+    #[test]
+    fn render_popup_previews() {
+        // Exercise the actual Windows renderer, including font measurement and clipping.
+        // CI exports these bitmaps for visual review; no game process is required.
+        let Ok(directory) = std::env::var("LOREPICKUP_PREVIEW_DIR") else { return; };
+        std::fs::create_dir_all(&directory).unwrap();
+        use windows_sys::Win32::Graphics::Gdi::{CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+        for (name, width, height, long, scroll) in [
+            ("grease-864",2048,864,false,0),
+            ("weapon-1080",2560,1080,true,0),
+            ("weapon-bottom-1080",2560,1080,true,100),
+            ("weapon-1440",3440,1440,true,0),
+        ] {
+            unsafe {
+                let dc = CreateCompatibleDC(null_mut());
+                assert!(!dc.is_null());
+                let info = BITMAPINFO { bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width, biHeight: -height, biPlanes: 1, biBitCount: 32,
+                    biCompression: BI_RGB, ..std::mem::zeroed()
+                }, ..std::mem::zeroed() };
+                let mut bits = null_mut();
+                let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+                assert!(!bitmap.is_null() && !bits.is_null());
+                let old = SelectObject(dc, bitmap);
+                let mut details = vec!["EFFECT  Coats armament, inflicting magic damage".into(),
+                    format!("IN PRACTICE  {}",crate::guidance::goods_note(0,"Magic Grease").unwrap())];
+                if long {
+                    details = vec!["TYPE  Halberd · Heavy · +8".into(),
+                        "REQUIRES  STR 14 · DEX 12".into(),
+                        "BASE ATTACK  Physical 190".into(),
+                        "SCALING  Mainly STR (relative weapon scaling)".into(),
+                        "SKILL  Spinning Strikes".into(), "WEIGHT  8.0".into(),
+                        format!("IN PRACTICE  {}",crate::guidance::weapon_class(29).1),
+                        "TWO-HANDING  10 STR meets the 14 STR requirement when two-handed; other requirements still apply.".into(),
+                        "DAMAGE NOTE  Base attack excludes your attribute bonus and enemy defences; it is not the damage each hit will deal.".into()];
+                }
+                let now = Instant::now();
+                let snapshot = DisplaySnapshot {
+                    entry: LoreEntry {raw_id:0,param_id:0,quantity:1,
+                        name: if long {"Halberd — layout sample"} else {"Magic Grease"}.into(),
+                        description: if long {
+                            "Weapon layout sample. The numerical values here are illustrative, not live item data.\n\nThis deliberately long passage checks that the original item description remains readable alongside the new practical notes. The live card reads its lore from the game's own messages.\n\nLong descriptions can be read with LB and RB while the title and dismissal prompt remain in place. This extra paragraph exercises the lower edge of the available space without reducing the text size."
+                        } else {
+                            "Solidified grease made from a mixture of magically resonant materials. Craftable item.\n\nCoats armament, adding magic damage to attacks. The effect lasts only for a short time."
+                        }.into(),icon_id:None,details},
+                    shown_at:now,age:Duration::from_secs(1),closing_age:None,queued:2,scroll,
+                };
+                let rect = RECT {left:0,top:0,right:width,bottom:height};
+                let brush = CreateSolidBrush(rgb(0,0,0)); FillRect(dc,&rect,brush); DeleteObject(brush);
+                draw_card(dc,&rect,&snapshot,PaintLayer::Background);
+                draw_card(dc,&rect,&snapshot,PaintLayer::Content);
+                windows_sys::Win32::Graphics::Gdi::GdiFlush();
+                let pixels = std::slice::from_raw_parts(bits as *const u8, (width*height*4) as usize);
+                assert!(pixels.iter().any(|&p| p > 100));
+                let mut bmp = Vec::new();
+                bmp.extend_from_slice(b"BM");
+                bmp.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
+                bmp.extend_from_slice(&[0u8;4]); bmp.extend_from_slice(&54u32.to_le_bytes());
+                bmp.extend_from_slice(std::slice::from_raw_parts(&info.bmiHeader as *const _ as *const u8,40));
+                bmp.extend_from_slice(pixels);
+                std::fs::write(std::path::Path::new(&directory).join(format!("{name}.bmp")),bmp).unwrap();
+                SelectObject(dc,old); DeleteObject(bitmap); DeleteDC(dc);
+            }
+        }
+    }
 
     fn recorded_pickup(state: &mut DisplayState, id: u32, name: &str, metadata: u32) {
         if crate::presentation::classify(metadata).shows_card() {
