@@ -688,6 +688,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
             + entry
                 .details
                 .iter()
+                .filter(|line| !line.starts_with("COLLECTION  "))
                 .map(|line| {
                     let (label, value) = split_detail(line);
                     let full = is_note(label);
@@ -697,7 +698,9 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
                 })
                 .sum::<i32>()
     };
-    let footer_height = px(30.0).max(24);
+    let collection = entry.details.iter().find_map(|line|line.strip_prefix("COLLECTION  "));
+    let collection_height = if collection.is_some() {px(24.0)} else {0};
+    let footer_height = px(30.0).max(24) + collection_height;
     let natural_height = pad_top
         + header_height
         + title_gap
@@ -894,7 +897,7 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
         );
         y += label_size + px(12.0);
 
-        for line in &entry.details {
+        for line in entry.details.iter().filter(|line| !line.starts_with("COLLECTION  ")) {
             let (label, value) = split_detail(line);
             SelectObject(hdc, selected_detail);
             let full = is_note(label);
@@ -928,12 +931,17 @@ unsafe fn draw_card(hdc: HDC, client: &RECT, snapshot: &DisplaySnapshot, layer: 
     }
 
     RestoreDC(hdc, saved_dc);
+    if let Some(progress) = collection {
+        SelectObject(hdc, if footer_font.is_null() { stock_font } else { footer_font });
+        draw_text_coloured(hdc, progress, text_left, footer_top, text_right, footer_top+collection_height,
+            rgb(185,177,147), DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
     draw_footer(
         hdc,
         text_left,
-        footer_top,
+        footer_top + collection_height,
         text_right,
-        footer_height,
+        footer_height - collection_height,
         snapshot.queued,
         scrollable,
         if footer_font.is_null() { stock_font } else { footer_font },
@@ -972,7 +980,7 @@ unsafe fn delete_fonts(fonts: &[*mut std::ffi::c_void]) {
 }
 
 fn is_note(label: &str) -> bool {
-    matches!(label, "IN PRACTICE" | "TWO-HANDING" | "DAMAGE NOTE" | "USE" | "SCALING NOTE")
+    label.starts_with("RECIPE ") || matches!(label, "IN PRACTICE" | "TWO-HANDING" | "DAMAGE NOTE" | "USE" | "SCALING NOTE" | "WHY KEEP IT" | "YOUR BUILD" | "COLLECTION" | "HOW TO MAKE")
 }
 
 fn font_face() -> &'static [u16] {
@@ -1398,6 +1406,8 @@ mod pickup_tests {
         use windows_sys::Win32::Graphics::Gdi::{CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
         for (name, width, height, long, scroll) in [
             ("grease-864",2048,864,false,0),
+            ("ingredient-1080",2560,1080,false,0),
+            ("ingredient-bottom-1080",2560,1080,false,100),
             ("weapon-1080",2560,1080,true,0),
             ("weapon-bottom-1080",2560,1080,true,100),
             ("weapon-1440",3440,1440,true,0),
@@ -1428,6 +1438,8 @@ mod pickup_tests {
                         "TWO-HANDING  10 STR meets the 14 STR requirement when two-handed; other requirements still apply.".into(),
                         "DAMAGE NOTE  Base attack excludes your attribute bonus and enemy defences; it is not the damage each hit will deal.".into()];
                 }
+                details.insert(0,"COLLECTION  127/2500 collected · NEW CARD".into());
+                if long { details.insert(3,"YOUR BUILD  Test character: With your base attributes, still needs DEX +2 (10 → 12). Equipment bonuses or temporary effects may change this.".into()); }
                 let now = Instant::now();
                 let mut snapshot = DisplaySnapshot {
                     entry: LoreEntry {raw_id:0,param_id:0,quantity:1,
@@ -1439,6 +1451,14 @@ mod pickup_tests {
                         }.into(),icon_id:None,details},
                     shown_at:now,age:Duration::from_secs(1),closing_age:None,queued:2,scroll,
                 };
+                if name.starts_with("ingredient") {
+                    snapshot.entry.name="Herb — recipe layout sample".into();
+                    snapshot.entry.description="Illustrative recipe fixture for layout verification. The live mod reads original lore, effects and quantities from your game.".into();
+                    let recipe=crate::insight::Recipe {name:"Test Cure".into(),effect:"Alleviates poison buildup".into(),output_category:0x40000000,output_id:1,output_quantity:1,
+                        ingredients:vec![crate::insight::Ingredient{category:0x40000000,id:1,name:"Herb".into(),quantity:2},crate::insight::Ingredient{category:0x40000000,id:2,name:"Moss".into(),quantity:1}],containers:vec![],unlock_required:true,complete:true};
+                    snapshot.entry.details=vec!["COLLECTION  127/2500 collected · NEW CARD".into(),format!("WHY KEEP IT  {}",crate::insight::ingredient_paragraph("Herb",&[recipe.clone()]))];
+                    for i in 1..=4 {snapshot.entry.details.push(format!("RECIPE {i}  {}",recipe.explanation()));}
+                }
                 if name.starts_with("overflow") {
                     snapshot.entry.description = snapshot.entry.description.repeat(3);
                 }

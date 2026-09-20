@@ -68,11 +68,11 @@ pub fn goods_note(kind: u8, name: &str) -> Option<&'static str> {
     match kind {
         2 | 11 => Some("A crafting ingredient. The recipe list shows what uses it; you may still need a cookbook to unlock a recipe. Gathering a material does not by itself unlock everything it can make."),
         3 => Some("A boss remembrance can be exchanged with Enia at Roundtable Hold for a reward. Consuming it for runes spends it; inspect the reward choices first."),
-        5 => Some("Memorise this at a Site of Grace and cast it with a staff. Meeting the spell's requirements lets you use it; damage also depends on the staff's sorcery scaling and upgrades."),
+        5 | 17 => Some("Memorise this at a Site of Grace and cast it with a staff. Meeting the spell's requirements lets you use it; damage also depends on the staff's sorcery scaling and upgrades."),
         7 | 8 => Some("Equip this spirit ash and summon where the rebirth-monument symbol appears. Roderika can strengthen it; summons are limited by the area's rules and your available FP or HP."),
         9 | 10 => Some("Mix Crystal Tears into the Flask of Wondrous Physick at a Site of Grace. Two tear effects can share one flask; the tears are reusable and the flask refills when you rest."),
         15 => Some("Check this rune's description for activation requirements. Equippable Great Runes are selected at a Site of Grace; a Rune Arc activates the equipped rune's benefit until death."),
-        16 => Some("Memorise this at a Site of Grace and cast it with a sacred seal. For offensive incantations, seal upgrades and incantation scaling matter as well as meeting the spell's requirements."),
+        16 | 18 => Some("Memorise this at a Site of Grace and cast it with a sacred seal. For offensive incantations, seal upgrades and incantation scaling matter as well as meeting the spell's requirements."),
         _ => None,
     }
 }

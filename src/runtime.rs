@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -165,12 +165,12 @@ pub fn lookup_icon_id(category: u32, param_id: u32) -> Option<u32> {
 }
 
 /// Compact, factual item data used by the card's lower information panel.
-pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Option<&str>) -> Vec<String> {
+pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Option<&str>, player: Option<&crate::player::Player>) -> Vec<String> {
     let mut lines = match category {
-        0x0000_0000 => weapon_details(param_id, name),
+        0x0000_0000 => weapon_details(param_id, name, player),
         0x1000_0000 => weight_details(0xD0, param_id, 0x24, "Armour", true),
         0x2000_0000 => weight_details(0x118, param_id, 0x0C, "Talisman", false),
-        0x4000_0000 => goods_details(param_id, name),
+        0x4000_0000 => goods_details(param_id, name, info, player),
         0x8000_0000 => vec!["TYPE  Ash of War".to_string()],
         _ => Vec::new(),
     };
@@ -188,14 +188,22 @@ pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Optio
     if category == 0x1000_0000 {
         lines.push("IN PRACTICE  Armour is not class-locked. Choose weight you can carry while keeping your preferred roll; staying below 70% of maximum equip load preserves a medium roll.".into());
     } else if category == 0x2000_0000 {
-        lines.push("IN PRACTICE  Choose this for its listed effect rather than a character class. Talismans can be swapped to suit a boss or a weapon; you do not need to spend levels to equip one.".into());
+        lines.push("IN PRACTICE  Talismans have no attribute requirements. Match this effect to the attacks or resource you actually use; swap it when the encounter calls for a different benefit.".into());
     } else if category == 0x8000_0000 {
         lines.push("IN PRACTICE  Apply at a Site of Grace to a compatible armament. The skill and the affinity are separate choices; the available affinities also depend on your whetblades.".into());
+    }
+    if matches!(category, 0x2000_0000 | 0x4000_0000) && info.is_some_and(|v| !v.trim().is_empty()) {
+        if category == 0x2000_0000 || goods_type(param_id).is_some_and(|t| matches!(t, 0 | 9 | 10)) {
+            let context = crate::insight::use_context(name, info.unwrap_or_default());
+            if !lines.iter().any(|line| line.contains(context)) {
+                lines.push(format!("USE  {context}"));
+            }
+        }
     }
     lines
 }
 
-fn weapon_details(param_id: u32, name: &str) -> Vec<String> {
+fn weapon_details(param_id: u32, name: &str, player: Option<&crate::player::Player>) -> Vec<String> {
     let Some(row) = param_row(0x88, param_id) else {
         return vec!["TYPE  Weapon".to_string()];
     };
@@ -210,6 +218,19 @@ fn weapon_details(param_id: u32, name: &str) -> Vec<String> {
             .iter().filter_map(|(name, offset)| read_u8(row + offset)
                 .filter(|v| *v > 0).map(|v| format!("{name} {v}"))).collect::<Vec<_>>();
         if !req.is_empty() { lines.push(format!("REQUIRES  {}", req.join(" · "))); }
+
+        if let Some(player) = player {
+            let required = [0xF2,0xF3,0xF4,0xF5,0x195].map(|o| read_u8(row+o).unwrap_or(0));
+            lines.push(format!("YOUR BUILD  {}: {}", player.name, crate::insight::requirements_note(
+                required, player.attributes, !matches!(kind, 50..=69 | 81..=86 | 89 | 90))));
+        }
+        if !matches!(kind, 50..=61 | 81..=90) {
+            if let Some(flags) = read_u8(row + 0x106) {
+                lines.push(format!("COATINGS  {}", if flags & 0x80 != 0 {
+                    "Accepts compatible weapon coatings and enchantments"
+                } else { "Does not accept ordinary weapon coatings" }));
+            }
+        }
 
         // EquipParamWeapon's attack values omit reinforcement. Use its reinforceTypeId to
         // resolve the corresponding ReinforceParamWeapon row; never call raw +0 values +8.
@@ -300,22 +321,50 @@ fn weight_details(
     }
 }
 
-fn goods_details(param_id: u32, name: &str) -> Vec<String> {
+pub fn goods_type(param_id: u32) -> Option<u8> {
+    unsafe { read_u8(param_row(0x160, param_id)? + 0x3E) }
+}
+
+fn goods_details(param_id: u32, name: &str, info: Option<&str>, player: Option<&crate::player::Player>) -> Vec<String> {
     let Some(row) = param_row(0x160, param_id) else {
         return crate::guidance::goods_note(255, name).map(|note| vec![format!("IN PRACTICE  {note}")]).unwrap_or_default();
     };
-    let goods_type = unsafe { read_u8(row + 0x3E) }.unwrap_or(0);
-    if let Some(lines) = whetblade_guidance(param_id) {
-        return lines;
+    let kind = unsafe { read_u8(row + 0x3E) }.unwrap_or(0);
+    if let Some(lines) = whetblade_guidance(param_id) { return lines; }
+    let mut lines = vec![format!("TYPE  {}", goods_type_label(kind))];
+    if matches!(kind, 5 | 16 | 17 | 18) {
+        if let Some(magic) = param_row(0x478, param_id) {
+            unsafe {
+                let required = [0, 0, read_u8(magic+0x22).unwrap_or(0), read_u8(magic+0x23).unwrap_or(0), read_u8(magic+0x0E).unwrap_or(0)];
+                let text = ["STR","DEX","INT","FAI","ARC"].iter().zip(required)
+                    .filter(|(_,v)| *v > 0).map(|(n,v)| format!("{n} {v}")).collect::<Vec<_>>();
+                if !text.is_empty() { lines.push(format!("REQUIRES  {}", text.join(" · "))); }
+                if let Some(player) = player { lines.push(format!("YOUR BUILD  {}: {}",player.name,crate::insight::requirements_note(required,player.attributes,false))); }
+                if let Some(fp) = read_u16(magic+0x10).filter(|v| *v < 10000) { lines.push(format!("FP COST  {fp} (initial cast; follow-ups or sustained casting may cost more)")); }
+                if let Some(slots) = read_u8(magic+0x21).filter(|v| *v > 0 && *v <= 12) { lines.push(format!("MEMORY  {slots} slot(s)")); }
+            }
+        }
     }
-
-    let mut lines = vec![format!("TYPE  {}", goods_type_label(goods_type))];
-    let recipes = crafting_outputs(param_id);
-    if !recipes.is_empty() {
-        lines.push(format!("USED TO MAKE  {}", recipes.join(" · ")));
+    if matches!(kind, 7 | 8) {
+        unsafe {
+            for (label,offset) in [("FP",0x80),("HP",0x82)] {
+                if let Some(cost) = read_u16(row+offset).filter(|v| *v > 0 && *v < 10000) { lines.push(format!("SUMMON COST  {cost} {label}")); }
+            }
+        }
     }
-    if let Some(note) = crate::guidance::goods_note(goods_type, name) {
-        lines.push(format!("IN PRACTICE  {note}"));
+    let recipes = recipe_book();
+    let uses: Vec<_> = recipes.iter().filter(|r| r.ingredients.iter().any(|m| m.category==0x40000000 && m.id==param_id) || (kind==11 && r.containers.iter().any(|container| container==name))).cloned().collect();
+    if !uses.is_empty() || matches!(kind,2|11) {
+        lines.push(format!("WHY KEEP IT  {}",crate::insight::ingredient_paragraph(name,&uses)));
+        for (index,recipe) in uses.iter().enumerate() { lines.push(format!("RECIPE {}  {}",index+1,recipe.explanation())); }
+    } else if let Some(recipe) = recipes.iter().find(|r| r.output_category==0x40000000 && r.output_id==param_id) {
+        lines.push(format!("HOW TO MAKE  {}",recipe.explanation()));
+    }
+    if !matches!(kind,2|11) {
+        if let Some(note) = crate::guidance::goods_note(kind, name) { lines.push(format!("IN PRACTICE  {note}")); }
+        else if let Some(effect) = info.filter(|s| !s.trim().is_empty()) {
+            lines.push(format!("IN PRACTICE  {}",crate::insight::use_context(name,effect)));
+        }
     }
     lines
 }
@@ -357,7 +406,7 @@ fn goods_type_label(goods_type: u8) -> &'static str {
         1 => "Key item",
         2 => "Crafting material",
         3 => "Remembrance",
-        5 => "Sorcery",
+        5 | 17 => "Sorcery",
         7 => "Spirit summon",
         8 => "Great spirit summon",
         9 => "Wondrous Physick",
@@ -366,7 +415,7 @@ fn goods_type_label(goods_type: u8) -> &'static str {
         12 => "Info item",
         14 => "Reinforcement material",
         15 => "Great Rune",
-        16 => "Incantation",
+        16 | 18 => "Incantation",
         _ => "Item",
     }
 }
@@ -389,57 +438,82 @@ fn affinity_label(param_id: u32) -> &'static str {
     }
 }
 
-fn crafting_outputs(material_id: u32) -> Vec<String> {
-    let Some(recipe_param) = param_base(0x868) else {
-        return Vec::new();
-    };
-    let Some(material_param) = param_base(0x748) else {
-        return Vec::new();
-    };
-    let Some(runtime) = RUNTIME.get() else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    let mut seen = HashSet::new();
-
-    for recipe_row in param_rows(recipe_param) {
-        unsafe {
-            let Some(material_set_id) = read_i32(recipe_row + 0x08).filter(|&id| id >= 0) else {
-                continue;
-            };
-            let Some(material_row) = find_row(material_param, material_set_id as u32) else {
-                continue;
-            };
-            let used = (0..6).any(|slot| {
-                read_i32(material_row + slot * 4) == Some(material_id as i32)
-                    && read_u8(material_row + 0x28 + slot) == Some(4)
-            });
-            if !used {
-                continue;
-            }
-
-            let equip_type = read_u8(recipe_row + 0x17).unwrap_or(3);
-            let Some(output_id) = read_i32(recipe_row)
-                .filter(|&id| id >= 0)
-                .map(|id| id as u32)
-            else {
-                continue;
-            };
-            let categories: &[u32] = match equip_type {
-                0 => &[11, 310, 410],
-                1 => &[12, 313, 413],
-                2 => &[13, 316, 416],
-                4 => &[35, 322, 422],
-                _ => &[10, 319, 419],
-            };
-            if seen.insert((equip_type, output_id)) {
-                if let Some(name) = lookup_first(runtime, categories, output_id) {
-                    names.push(name);
+/// Loaded once, from the running game's recipe/material tables. No inventory or unlock
+/// state is inferred from owning a material. Missing names keep an explicit incomplete marker.
+fn recipe_book() -> &'static [crate::insight::Recipe] {
+    static RECIPES: OnceLock<Vec<crate::insight::Recipe>> = OnceLock::new();
+    if let Some(book) = RECIPES.get() { return book; }
+    let (Some(recipes),Some(materials)) = (param_base(0x868),param_base(0x748)) else { return &[]; };
+    let mut book=Vec::new(); let mut seen=HashSet::new();
+    // Regenerative goods supply capacity to consumables in the same pot group. This
+    // resolves Cracked/Ritual/Hefty Pots and Perfume Bottles without guessing from names.
+    let mut containers=std::collections::BTreeMap::<u8,Vec<String>>::new();
+    if let Some(goods)=param_base(0x160) {
+        for (id,row) in param_entries(goods) {
+            unsafe {
+                if read_u8(row+0x3E)!=Some(11) {continue;}
+                if let Some(group)=read_u8(row+0x2E).filter(|g| *g < 16) {
+                    if let Some(name)=lookup_item_text(0x40000000,id).0 {containers.entry(group).or_default().push(name);}
                 }
             }
         }
     }
-    names
+    for row in param_rows(recipes) {
+        unsafe {
+            let Some(id)=read_i32(row).filter(|id| *id >= 0) else { continue; };
+            let category=match read_u8(row+0x17) {Some(0)=>0,Some(1)=>0x10000000,Some(2)=>0x20000000,Some(3)=>0x40000000,Some(4)=>0x80000000,_=>continue};
+            let Some(set_id)=read_i32(row+0x08).filter(|id| *id >= 0) else { continue; };
+            if !seen.insert((category,id,set_id)) { continue; }
+            let Some(set)=find_row(materials,set_id as u32) else { continue; };
+            let (Some(name),effect,_) = lookup_item_text(category,id as u32) else { continue; };
+            let mut ingredients=Vec::new();let mut complete=true;
+            for slot in 0..6 {
+                let Some(material_id)=read_i32(set+slot*4).filter(|id| *id >= 0) else { continue; };
+                // Material categories are item-ID categories, NOT ShopLineup equipType.
+                let raw_category=read_u8(set+0x28+slot).unwrap_or(255);
+                let material_category=match raw_category { 1=>0x10000000,4=>0x40000000,_=>0xF0000000 };
+                let material_name=lookup_item_text(material_category,material_id as u32).0;
+                if material_name.is_none() { complete=false; }
+                let amount=read_u8(set+0x20+slot).filter(|v| *v <= 127).unwrap_or(0);
+                if amount==0 { complete=false; }
+                ingredients.push(crate::insight::Ingredient{category:material_category,id:material_id as u32,
+                    name:material_name.unwrap_or_else(||format!("Unresolved material {material_id}")),quantity:amount});
+            }
+            if ingredients.is_empty() { continue; }
+            let required_containers=if category==0x40000000 {
+                param_row(0x160,id as u32).and_then(|output|read_u8(output+0x2E)).and_then(|group|containers.get(&group)).cloned().unwrap_or_default()
+            } else {Vec::new()};
+            book.push(crate::insight::Recipe{name,effect:effect.unwrap_or_default().replace(['\r','\n']," "),
+                output_category:category,output_id:id as u32,output_quantity:read_u16(row+0x1A).filter(|v| *v > 0 && *v <= 999).unwrap_or(1),
+                ingredients,containers:required_containers,unlock_required:read_i32(row+0x10).unwrap_or(0)!=0,complete});
+        }
+    }
+    book.sort_by(|a,b|a.name.cmp(&b.name));
+    if book.is_empty() { return &[]; }
+    let _=RECIPES.set(book); RECIPES.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// The denominator is a supported named catalogue, not a claim about unobtainable/debug
+/// rows or DLC entitlement. Only names that actually resolve in this installation count.
+pub fn lore_catalogue() -> &'static BTreeSet<String> {
+    static CATALOGUE: OnceLock<BTreeSet<String>> = OnceLock::new();
+    static EMPTY: OnceLock<BTreeSet<String>> = OnceLock::new();
+    if let Some(catalogue)=CATALOGUE.get() { return catalogue; }
+    if param_base(0x160).is_none() { return EMPTY.get_or_init(BTreeSet::new); }
+    let mut catalogue=BTreeSet::new();let mut visited=HashSet::new();
+    for line in include_str!("../assets/icon-map.csv").lines() {
+        let mut fields=line.split(',');
+        let (Some(category),Some(id))=(fields.next().and_then(|v|u32::from_str_radix(v,16).ok()),fields.next().and_then(|v|v.parse::<u32>().ok())) else {continue;};
+        let kind=if category==0x40000000 {goods_type(id)} else {None};
+        let id=crate::collection::canonical_id(category,id,kind);
+        if !visited.insert((category,id)) {continue;}
+        if let Some(name)=lookup_item_text(category,id).0 {
+            if !name.contains("[ERROR]") { catalogue.insert(crate::collection::key(category,id,kind)); }
+        }
+    }
+    if catalogue.is_empty() { return EMPTY.get_or_init(BTreeSet::new); }
+    log_line(&format!("LorePickup: resolved {} distinct named catalogue cards.",catalogue.len()));
+    let _=CATALOGUE.set(catalogue); CATALOGUE.get().unwrap()
 }
 
 fn param_base(param_offset: usize) -> Option<usize> {
@@ -487,6 +561,10 @@ fn find_row(param: usize, row_id: u32) -> Option<usize> {
 }
 
 fn param_rows(param: usize) -> Vec<usize> {
+    param_entries(param).into_iter().map(|(_,row)|row).collect()
+}
+
+fn param_entries(param: usize) -> Vec<(u32,usize)> {
     unsafe {
         let Some(table_end) = read_i32(param + 0x30) else {
             return Vec::new();
@@ -498,10 +576,12 @@ fn param_rows(param: usize) -> Vec<usize> {
         (0..count)
             .filter_map(|index| {
                 let entry = param + 0x40 + index * 0x18;
+                let id=read_i32(entry)?;
+                if id < 0 {return None;}
                 let offset = read_i32(entry + 0x08)?;
                 (0..=0x0800_0000)
                     .contains(&offset)
-                    .then(|| param + offset as usize)
+                    .then(|| (id as u32,param + offset as usize))
             })
             .collect()
     }

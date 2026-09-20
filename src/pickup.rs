@@ -126,13 +126,14 @@ fn process_popup(raw_id: u32, quantity: i32) {
     let icon_id = live_icon
         .filter(|&id| crate::icons::icon_path(id).is_some())
         .or_else(|| fallback_icon.filter(|&id| crate::icons::icon_path(id).is_some()));
-    let details = runtime::lookup_item_details(category, param_id, &name, info.as_deref());
+    let player = crate::player::current();
+    let details = runtime::lookup_item_details(category, param_id, &name, info.as_deref(), player.as_ref());
 
     runtime::log_line(&format!(
         "LorePickup: icon lookup raw={raw_id:#x}, live={live_icon:?}, fallback={fallback_icon:?}, selected={icon_id:?}."
     ));
 
-    overlay::enqueue(overlay::LoreEntry {
+    let mut entry = overlay::LoreEntry {
         raw_id,
         param_id,
         quantity,
@@ -140,5 +141,8 @@ fn process_popup(raw_id: u32, quantity: i32) {
         description,
         icon_id,
         details,
-    });
+    };
+    let progress = crate::journal::record(&entry, player.as_ref());
+    entry.details.insert(0, format!("COLLECTION  {progress}"));
+    overlay::enqueue(entry);
 }

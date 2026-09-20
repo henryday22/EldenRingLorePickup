@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: ["main", "v0.9.0-preview"]
+    branches: ["main", "v0.10.0-preview"]
   pull_request:
   workflow_dispatch:
 
@@ -35,6 +35,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/EldenRingLorePickup.dll dist/EldenRingLorePickup.dll
           Copy-Item README.md dist/README.md
+          Copy-Item "Open Lore Journal.cmd" "dist/Open Lore Journal.cmd"
           Copy-Item LorePickup.me3.example dist/LorePickup.me3.example
           Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
 
@@ -67,36 +68,38 @@ jobs:
       - name: Package release
         if: github.event_name != 'pull_request'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.9.0.zip
+        run: Compress-Archive -Path dist/* -DestinationPath EldenRingLorePickup-v0.10.0.zip
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: EldenRingLorePickup-v0.9.0
-          path: EldenRingLorePickup-v0.9.0.zip
+          name: EldenRingLorePickup-v0.10.0
+          path: EldenRingLorePickup-v0.10.0.zip
 
-      - name: Publish v0.9.0 release
+      - name: Publish v0.10.0 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.9.0
+          tag_name: v0.10.0
           target_commitish: ${{ github.sha }}
-          name: LorePickup v0.9.0 — Centred cards and practical item notes
+          name: LorePickup v0.10.0 — Practical recipes and character collections
           prerelease: true
           body: |
-            Keeps the v0.8.2 pickup classification and Y dismissal logic that the user confirmed working.
+            Adds recipe explanations, character-aware requirement checks and a persistent local collection journal. Keeps the working pickup classification, Y dismissal and stacked deck.
 
-            Cards now centre vertically using their measured height and the visible stack. Warm charcoal, muted gold-grey rules and ivory serif text replace the blue-grey rounded styling. Uses an installed Agmena face when available, otherwise Garamond/Georgia; this is a visual approximation, not the game's actual UI renderer or a bundled game font.
+            Ingredients now explain why to keep them, what finished items do, all material quantities and recipe-unlock requirements. Reusable pot/perfume containers are resolved from live pot groups. Crafted consumables also show their recipe. Exact cookbook names, cookbook ownership and inventory availability are not yet resolved.
 
-            Adds practical item notes alongside original lore. Weapons prioritise class, affinity, requirements, reinforcement-adjusted base attack, relative scaling, skill, base status buildup and weight, with class-specific usage advice and two-handed Strength requirements. Casting tools do not mislabel melee damage as spell damage. Materials retain their complete recipe output list. Consumables, spells, summons, upgrade materials, armour and talismans get relevant usage guidance where supported. Notes are authored rules; they are not invented game lore or bespoke essays for every item.
+            Weapons retain relevant damage, affinity, scaling and skill information, and add coating compatibility and a base-attribute requirement check for the current character. Spells add requirements, FP and memory slots; spirits show summon costs. Practical effect/context notes also cover other supported item types. Facts are read from the game; prose is authored rule-based guidance, not invented lore.
 
-            Long cards keep their font size: LB/RB scroll the text while the title and Y prompt remain visible. These inputs are observed, not intercepted, so the game can also receive them.
+            The fixed card footer shows X/Y collected. Open Lore Journal.cmd opens a searchable offline journal with separate character collections. Repeat pickups still show cards but do not inflate progress; reinforcement/affinity variants share a collection entry. Progress starts with this version; existing inventory is not backfilled. The denominator is the supported named catalogue plus recorded discoveries, not a verified obtainable-items total.
 
-            Validation: automated regression tests and actual Windows GDI renderer previews at 864p, 1080p and 1440p, plus the release build. New styling and live parameter reads still require in-game verification.
+            Automatic character context is limited to the validated 1.17-era address layout. If the footer says collection is paused, set a unique profile name in the generated LorePickup.ini beside the DLL and restart. Full profile, storage and count details are in README.md. No game save is edited.
 
-            Close the game, replace EldenRingLorePickup.dll, keep the icons and .me3 entry, then relaunch. No new artwork or font installation is required.
-          files: EldenRingLorePickup-v0.9.0.zip
+            Validation: regression/unit tests, a Windows release build and actual GDI renderer previews. New live recipe and character reads still require in-game verification.
+
+            Installation: close the game, replace the DLL and copy Open Lore Journal.cmd from the archive. Keep the icons folder, existing LorePickup.ini and .me3 entry, then relaunch.
+          files: EldenRingLorePickup-v0.10.0.zip
           fail_on_unmatched_files: true
 
       - name: Upload DLL-only PR build

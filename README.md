@@ -2,39 +2,74 @@
 
 Displays item lore, inventory icons and useful gameplay details in a modern side panel.
 
-## v0.9.0: centred cards, popup palette, useful field notes
+## v0.10.0: recipes, character guidance and a collection journal
 
-[Download v0.9.0](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.9.0).
+[Download v0.10.0](https://github.com/henryday22/EldenRingLorePickup/releases/tag/v0.10.0).
 
-The v0.8.2 pickup trigger and controller-Y dismissal are preserved. The user confirmed that
-version now displays cards for their item panels. This revision changes presentation and item
-information, not the event filter.
+The confirmed v0.8.2 pickup filter, Y dismissal, stacked deck and v0.9.0 centred styling are retained.
+Every qualifying repeat pickup still shows its card. Collection history never suppresses a popup.
 
-- **Position:** each card and its visible stack are vertically centred using the measured text
-  height, including after a window resize or advancing to a different item.
-- **Appearance:** warm charcoal, restrained gold-grey double rules, ivory serif text and a ringed
-  Y prompt. No parchment image, particle effect or blue-grey rounded border.
-- **Font:** an installed Agmena Pro / Agmena W1G / Agmena face is preferred, then Garamond and
-  Georgia. Proprietary game fonts are not bundled; the default is an approximation, not a claim
-  of a pixel-identical reproduction of the game renderer.
-- **Weapons:** class, affinity, upgrade level, requirements, base attack with reinforcement where
-  available, leading scaling attributes, skill, base status buildup and weight. Practical notes
-  explain the weapon class and the reduced Strength requirement when two-handed. Base attack is
-  explicitly distinguished from player-adjusted attack rating or actual damage dealt; a casting
-  tool's melee attack is not presented as spell damage. Scaling guidance compares coefficients,
-  not the damage of a specific character build.
-- **Other items:** practical notes for materials, grease, cookbooks, bell bearings, upgrade stones,
-  spirits, spells, tears, armour, talismans and Ashes of War, alongside original game lore/effects.
-  Recipes are no longer silently limited to the first four outputs. Whetblade affinity guidance
-  remains available. Unknown items retain their original text without fabricated lore.
-- **Long descriptions:** keep readable type and scroll with **LB/RB** when the footer says
-  “read more”. The title and Y prompt remain fixed. These buttons are observed, not intercepted;
-  they may also reach the game. Short cards require no scrolling.
+- **Ingredients:** a “Why keep it” paragraph connects an actual recipe to its effect and practical
+  use. Every resolved recipe includes output quantity, all material names/quantities, the output's
+  effect and a recipe-unlock reminder. Pots/perfumes also identify their reusable container through
+  the live pot-group data. Container cards list the recipes that use their capacity.
+- **Crafted consumables:** also show how to make another, with the same requirements. The mod does
+  not claim you own the other ingredients or have unlocked the cookbook. Exact cookbook names and
+  unlock status are not resolved in this version; the Item Crafting menu remains authoritative.
+- **Weapons:** retain affinity, requirements, reinforcement-adjusted base attack, leading scaling,
+  skill, base status buildup, weight and class/selected-weapon practical notes. Coating compatibility
+  is read from the current weapon row. “Your build” checks your character's base attributes and
+  explains deficits or two-handed eligibility. This excludes equipment bonuses and temporary buffs;
+  base attack is not final attack rating or damage dealt to an enemy.
+- **Spells:** requirements, initial FP cost, memory slots, casting-tool guidance and a personal
+  requirement check. Sustained/follow-up casting can cost more. Casting-tool melee damage is never
+  presented as spell damage. Spirit ashes show their FP/HP summon cost where provided.
+- **Other item types:** armour focuses on weight/roll implications; talismans and consumables connect
+  their effect to a practical use; cookbooks, bell bearings, upgrade materials, tears, remembrances,
+  Great Runes and Ashes of War explain how they are used. Whetblades explain affinity/scaling choices.
+- **Collection:** a fixed footer shows **X/Y collected** and marks new cards. Each character has an
+  independent collection. Repeat pickups update its saved note without adding a duplicate; weapon
+  upgrades/affinities and spirit upgrades share a card. Armour alterations and talisman tiers remain distinct.
+- **Journal:** `Open Lore Journal.cmd` opens your local, searchable collection in a browser. Select a
+  character, filter by item type, search names/effects/materials, and reread original lore and field notes.
+  Reload the page to see discoveries made while it was open. Saved build checks are pickup-time snapshots.
 
-The extra prose is authored category/use guidance selected from live item data and, for certain
-consumables, English item names. It is not a unique generated story for every item. Selected weapons (Clawmark Seal, Claymore and Bloodhound's Fang) also have specific notes. Numerical
-values come from game parameters rather than a bundled balance database. Non-English item
-names still receive category guidance; English-name-specific notes may not appear.
+Recipe facts, item effects, names and numerical values come from the installed game's parameters
+and messages. Practical prose uses authored rules, not an online AI service or invented story text.
+English-name/effect-specific advice may not match other languages; numerical data and original game
+text still follow the installation. Unresolved data is labelled rather than filled in with guessed facts.
+
+## Collection profiles and storage
+
+The default `profile=auto` in `LorePickup.ini` beside the DLL reads the supported 1.17-era character's
+save slot, saved character ID and name. Attribute/level sanity checks must pass. No game save is modified.
+If the runtime or character cannot be identified, cards still work and the footer asks you to choose a
+profile; collection data is not silently mixed with another character's records.
+
+For unsupported runtimes, renamed/recreated characters or copied saves, edit the generated INI to a
+unique profile, for example `profile=Strength Journey`, then restart the game. Use a different value
+for each character; reuse the same value to continue that collection. An explicit profile names a
+separate collection; it does not migrate automatic-profile records.
+
+Progress begins with item panels observed after installing this version; older inventory is not
+backfilled. **Y is the bundled supported catalogue whose names resolve in your game, plus recorded
+additional items**, not a claim that every entry is obtainable in your current playthrough. DLC
+names can be present without access to the DLC. It is not a game achievement or vanilla completion total.
+
+Data lives in `%LOCALAPPDATA%\EldenRingLorePickup\collection.json`; the browser journal is `index.html`.
+The previous JSON is retained as `collection.backup.json`. Writes use a background worker, a flushed
+temporary file and atomic replacement. An unreadable or unsupported existing file is preserved and
+collection writes are disabled for that session; check the log rather than deleting your history.
+Keep a copy of the JSON if moving to another PC. No cloud account or network service is needed.
+
+## Presentation
+
+Cards centre vertically using their measured height and visible deck. The background is translucent
+warm charcoal with gold-grey rules and opaque ivory text/icons. No parchment or particle animation.
+An installed Agmena face is preferred, then Garamond/Georgia; no proprietary game font is bundled.
+The appearance approximates the game's popup, rather than using its actual UI renderer.
+Long text scrolls with **LB/RB**, while title, collection count and Y prompt remain fixed. These
+buttons are observed, not intercepted, so the game may also receive them.
 
 ## Pickup eligibility
 
@@ -46,7 +81,8 @@ Stalwart Horn Charm and the three Cracked Tears. Ordinary unflagged pickups rema
 ## Installation
 
 Close Elden Ring, replace `EldenRingLorePickup.dll`, and relaunch. Keep the existing icon folder
-and `.me3` entry. The package layout is:
+and `.me3` entry. Put `Open Lore Journal.cmd` beside the DLL (or anywhere convenient).
+`LorePickup.ini` is created on first launch and preserved on subsequent starts. The package layout is:
 
     profiles/
       eldenring-default.me3
@@ -54,6 +90,8 @@ and `.me3` entry. The package layout is:
         EldenRingLorePickup/
           EldenRingLorePickup.dll
           EldenRingLorePickup-icons/
+          Open Lore Journal.cmd
+          LorePickup.ini  (created on first launch)
 
 The ME3 profile entry is:
 
@@ -79,11 +117,12 @@ The old `EldenRingLorePickup-card.png` is unused. No background artwork is requi
 
 ## Validation and limits
 
-The v0.8.2 trigger has user confirmation; v0.9.0 styling and added param reads still need in-game
-verification. Automated tests use the exact metadata
+The v0.8.2 trigger has user confirmation. The new live recipe, character and collection features
+still require in-game verification; automated tests do not substitute for it. Automated tests use the exact metadata
 values from the supplied logs and exercise the three-Tear queue, repeat items, ordinary pickups,
 long reading times and held Y. The Windows DLL is built in GitHub Actions. Actual GDI renderer previews cover 864p, 1080p,
-1440p, a short card, a long card and its scrolled bottom. Layout checks cover up to 2160p.
+1440p, short and long cards, recipe lists, collection footers and scrolled content. Collection tests cover
+profile isolation, repeat discoveries, serialization/restart, atomic file replacement and unsafe text escaping. Layout checks cover up to 2160p.
 
 The previous HUD gate is removed entirely. This release observes controller Y rather than the
 actual item-panel close event. Keyboard/remapped confirm input, panels closed by death/loading,
@@ -91,7 +130,7 @@ and unusual input timing are not yet synchronized. It does not claim end-to-end 
 support for every unobserved presentation path. The observed metadata interpretation is grounded
 in the user's 2.7.1.0 / 1.17-era sessions; older runtime patterns remain compatibility candidates.
 
-The diagnostic log is `EldenRingLorePickup.log` in the game's working directory. A v0.9.0
+The diagnostic log is `EldenRingLorePickup.log` in the game's working directory. A v0.10.0
 session logs `metadata=`, its `presentation decision`, and the queued item names. It should not
 produce `panel probe` or `candidate expired` entries.
 

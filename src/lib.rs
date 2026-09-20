@@ -2,6 +2,10 @@
 
 mod icons;
 mod guidance;
+mod insight;
+mod collection;
+mod journal;
+mod player;
 mod overlay;
 mod pickup;
 mod presentation;
@@ -49,7 +53,7 @@ pub unsafe extern "system" fn DllMain(
     thread::spawn(move || {
         runtime::init_log();
         runtime::log_line(
-            "LorePickup v0.9.0 bootstrap: centred popup styling and practical item guidance; v0.8.2 trigger preserved.",
+            "LorePickup v0.10.0 bootstrap: recipes, character context and collection journal; v0.8.2 trigger preserved.",
         );
 
         let runtime = (0..120).find_map(|_| match runtime::detect_runtime() {
@@ -72,6 +76,7 @@ pub unsafe extern "system" fn DllMain(
             return;
         }
 
+        journal::start();
         if let Err(err) = overlay::start() {
             runtime::log_line(&format!("LorePickup: Win32 overlay failed to start: {err}"));
         } else {

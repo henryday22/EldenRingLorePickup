@@ -97,3 +97,15 @@ Selected weapon-note checks: [Claymore](https://eldenring.wiki.fextralife.com/Cl
 [Bloodhound's Fang buff discussion](https://steamcommunity.com/app/1245620/discussions/0/3820780544828221988/),
 [Clawmark Seal scaling discussion](https://www.reddit.com/r/Eldenring/comments/t2n8l8/about_the_clawmark_seal/).
 Notes paraphrase mechanics rather than reproducing source descriptions.
+
+## v0.10.0 recipe, spell and character data references
+
+- [EldenRingDatabase/erdb](https://github.com/EldenRingDatabase/erdb): public recipe/material category
+  definitions and the relationship between Goods and Magic rows were used as factual layout references.
+- [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs): public Goods, Magic, recipe, material,
+  PlayerGameData and GameMan field definitions were checked for offsets and types.
+- [Banon-Labs/er-mods-rs](https://github.com/Banon-Labs/er-mods-rs): numerical 1.17 global mapping
+  (GameDataMan 0x3D61F98, GameMan 0x3D6D988) and documented pot-group/consumable relationships.
+
+These sources inform numeric layouts and relationships; no source implementation from these
+projects is copied into the mod. Recipe prose, collection model and journal interface are original.
