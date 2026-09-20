@@ -32,7 +32,7 @@ information, not the event filter.
   they may also reach the game. Short cards require no scrolling.
 
 The extra prose is authored category/use guidance selected from live item data and, for certain
-consumables, English item names. It is not a unique generated story for every item. Numerical
+consumables, English item names. It is not a unique generated story for every item. Selected weapons (Clawmark Seal, Claymore and Bloodhound's Fang) also have specific notes. Numerical
 values come from game parameters rather than a bundled balance database. Non-English item
 names still receive category guidance; English-name-specific notes may not appear.
 

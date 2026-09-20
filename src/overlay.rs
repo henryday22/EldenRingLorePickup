@@ -1401,6 +1401,8 @@ mod pickup_tests {
             ("weapon-1080",2560,1080,true,0),
             ("weapon-bottom-1080",2560,1080,true,100),
             ("weapon-1440",3440,1440,true,0),
+            ("overflow-top-1080",2560,1080,true,0),
+            ("overflow-bottom-1080",2560,1080,true,100),
         ] {
             unsafe {
                 let dc = CreateCompatibleDC(null_mut());
@@ -1427,7 +1429,7 @@ mod pickup_tests {
                         "DAMAGE NOTE  Base attack excludes your attribute bonus and enemy defences; it is not the damage each hit will deal.".into()];
                 }
                 let now = Instant::now();
-                let snapshot = DisplaySnapshot {
+                let mut snapshot = DisplaySnapshot {
                     entry: LoreEntry {raw_id:0,param_id:0,quantity:1,
                         name: if long {"Halberd — layout sample"} else {"Magic Grease"}.into(),
                         description: if long {
@@ -1437,10 +1439,16 @@ mod pickup_tests {
                         }.into(),icon_id:None,details},
                     shown_at:now,age:Duration::from_secs(1),closing_age:None,queued:2,scroll,
                 };
+                if name.starts_with("overflow") {
+                    snapshot.entry.description = snapshot.entry.description.repeat(3);
+                }
                 let rect = RECT {left:0,top:0,right:width,bottom:height};
                 let brush = CreateSolidBrush(rgb(0,0,0)); FillRect(dc,&rect,brush); DeleteObject(brush);
                 draw_card(dc,&rect,&snapshot,PaintLayer::Background);
                 draw_card(dc,&rect,&snapshot,PaintLayer::Content);
+                if name.starts_with("overflow") {
+                    assert!(MAX_SCROLL.load(Ordering::Relaxed) > 0, "preview must actually exercise scrolling");
+                }
                 windows_sys::Win32::Graphics::Gdi::GdiFlush();
                 let pixels = std::slice::from_raw_parts(bits as *const u8, (width*height*4) as usize);
                 assert!(pixels.iter().any(|&p| p > 100));

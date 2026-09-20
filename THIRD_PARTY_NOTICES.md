@@ -92,3 +92,8 @@ Weapon-type numeric mappings were checked against
 [Smithbox WEP_TYPE](https://github.com/vawser/Smithbox/blob/main/src/Smithbox.Data/Assets/PARAM/ER/Param%20Enums/WEP_TYPE.json).
 Practical notes are original category-level guidance, not copied wiki articles or invented lore.
 Original lore is read from the user's game. No proprietary font or new background image is bundled.
+
+Selected weapon-note checks: [Claymore](https://eldenring.wiki.fextralife.com/Claymore),
+[Bloodhound's Fang buff discussion](https://steamcommunity.com/app/1245620/discussions/0/3820780544828221988/),
+[Clawmark Seal scaling discussion](https://www.reddit.com/r/Eldenring/comments/t2n8l8/about_the_clawmark_seal/).
+Notes paraphrase mechanics rather than reproducing source descriptions.

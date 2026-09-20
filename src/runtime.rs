@@ -167,7 +167,7 @@ pub fn lookup_icon_id(category: u32, param_id: u32) -> Option<u32> {
 /// Compact, factual item data used by the card's lower information panel.
 pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Option<&str>) -> Vec<String> {
     let mut lines = match category {
-        0x0000_0000 => weapon_details(param_id),
+        0x0000_0000 => weapon_details(param_id, name),
         0x1000_0000 => weight_details(0xD0, param_id, 0x24, "Armour", true),
         0x2000_0000 => weight_details(0x118, param_id, 0x0C, "Talisman", false),
         0x4000_0000 => goods_details(param_id, name),
@@ -195,7 +195,7 @@ pub fn lookup_item_details(category: u32, param_id: u32, name: &str, info: Optio
     lines
 }
 
-fn weapon_details(param_id: u32) -> Vec<String> {
+fn weapon_details(param_id: u32, name: &str) -> Vec<String> {
     let Some(row) = param_row(0x88, param_id) else {
         return vec!["TYPE  Weapon".to_string()];
     };
@@ -262,7 +262,7 @@ fn weapon_details(param_id: u32) -> Vec<String> {
             .map(|(name, value)| format!("{name} {value}")).collect::<Vec<_>>();
         if !passive.is_empty() { lines.push(format!("BASE BUILDUP  {} (before attribute bonuses)", passive.join(" · "))); }
         if let Some(weight) = weight { lines.push(format!("WEIGHT  {weight:.1}")); }
-        lines.push(format!("IN PRACTICE  {note}"));
+        lines.push(format!("IN PRACTICE  {}", crate::guidance::named_weapon_note(name).unwrap_or(note)));
         if !matches!(kind, 50..=69 | 81..=86 | 89 | 90) {
             if let Some(strength) = read_u8(row + 0xF2).filter(|v| *v > 1) {
                 lines.push(format!("TWO-HANDING  {} STR meets the {} STR requirement when two-handed; other requirements still apply.", crate::guidance::two_hand_requirement(strength), strength));
@@ -344,7 +344,7 @@ fn whetblade_guidance(param_id: u32) -> Option<Vec<String>> {
         ],
         8974 => &[
             "UNLOCKS  Poison · Blood · Occult affinities",
-            "SCALING  Poison/Blood add ARC scaling and status buildup; Occult shifts physical and innate-status scaling toward ARC",
+            "SCALING  Poison/Blood add ARC scaling and their status buildup. Occult favours physical ARC scaling; existing bleed/poison may scale, but Occult does not add those effects",
         ],
         _ => return None,
     };

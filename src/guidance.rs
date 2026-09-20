@@ -4,6 +4,19 @@ pub fn two_hand_requirement(strength: u8) -> u8 {
     (u16::from(strength) * 2).div_ceil(3) as u8
 }
 
+pub fn named_weapon_note(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase().replace('’', "'");
+    if name.contains("bloodhound's fang") {
+        Some("An unusual Somber weapon that still accepts weapon buffs. Its innate bleed can work alongside a compatible coating; the fixed skill trades space for a follow-up attack.")
+    } else if name.contains("clawmark seal") {
+        Some("Useful for a Strength/Faith caster: both attributes contribute to offensive incantation scaling, and the seal boosts bestial incantations. Its melee attack value is not a measure of how hard Lightning Spear will hit.")
+    } else if name.contains("claymore") {
+        Some("Its thrusting heavy attack is a useful distinction from many other greatswords: it gives you a focused poke for punishing an opening, alongside the broader swings of its light attacks.")
+    } else {
+        None
+    }
+}
+
 // WEP_TYPE values from Smithbox's ER enum; these are class tendencies, not bespoke movesets.
 pub fn weapon_class(kind: u16) -> (&'static str, &'static str) {
     match kind {
@@ -83,5 +96,7 @@ mod tests {
         assert!(goods_note(1, "Nomadic Warrior's Cookbook [1]").unwrap().contains("recipes"));
         assert!(goods_note(2, "Rowa Fruit").unwrap().contains("ingredient"));
         assert!(goods_note(255, "Unknown").is_none());
+        assert!(named_weapon_note("Heavy Claymore +8").unwrap().contains("thrusting"));
+        assert!(named_weapon_note("Bloodhound’s Fang +5").unwrap().contains("buffs"));
     }
 }
